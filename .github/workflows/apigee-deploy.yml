@@ -10,7 +10,7 @@ on:
 
 jobs:
   API_Proxy_Deployment:
-    uses: /apatilgtn/apigeex-proxy-ci-cd-main/blob/main/.github/workflows/Reusable-proxy-deploy.yml@main
+    uses: apatilgtn/apigeex-proxy-ci-cd-main/.github/workflows/Reusable-proxy-deploy.yml@main
     permissions:
       contents: read
       id-token: write 
