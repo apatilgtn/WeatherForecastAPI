@@ -1,0 +1,27 @@
+name: Apigee Proxy Deployment
+
+on:
+  push:
+    branches: [ main ]  # Trigger on push to the main branch
+    paths:
+      - 'src/**'  # Trigger when code in the src directory changes
+      - 'apiproxy/**'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  API_Proxy_Deployment:
+    uses: ./apatilgtn/apigeex-proxy-ci-cd-main/blob/main/.github/workflows/Reusable-proxy-deploy.yml
+    permissions:
+      contents: read
+      id-token: write 
+    with:
+      proxy_name: 'WeatherForecastAPI'  # Replace with your proxy name or dynamically pass it
+      dev_env: 'dev'  # Development environment
+      test_env: 'test'  # Testing environment
+      uat_env: 'uat'  # UAT environment
+      #proxy-path: ''
+      proxy-directory: 'apiproxy'
+    secrets:
+      apigee_org: ${{ secrets.APIGEE_ORG }}  # Pass the secret here directly
+      workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}
+      service_account: ${{ secrets.SERVICE_ACCOUNT }}
