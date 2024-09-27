@@ -18,34 +18,6 @@ jobs:
       contents: read
       id-token: write
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          #token_format: 'access_token'
-          project_id: ${{ env.PROJECT_ID }}
-          workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}'
-          service_account: '${{ secrets.SERVICE_ACCOUNT }}'
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Use gcloud CLI
-        run: |
-          gcloud info
-          gcloud config list
-          gcloud auth list
-
-      - name: Debug Identity Token
-        run: |
-          echo "GitHub Actor: ${{ github.actor }}"
-          echo "GitHub Repository: ${{ github.repository }}"
-          echo "GitHub Ref: ${{ github.ref }}"
-
   deploy_proxy:
     needs: setup_and_auth
     uses: apatilgtn/apigeex-proxy-ci-cd-main/.github/workflows/Reusable-proxy-deploy.yml@main
