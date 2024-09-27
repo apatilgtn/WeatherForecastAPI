@@ -21,7 +21,7 @@ jobs:
       uat_env: 'uat'  # UAT environment
       #proxy-path: ''
       proxy-directory: 'apiproxy'
-    secrets:
-      apigee_org: ${{ secrets.APIGEE_ORG }}  # Pass the secret here directly
-      workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}
-      service_account: ${{ secrets.SERVICE_ACCOUNT }}
+    #secrets:
+      #apigee_org: ${{ secrets.APIGEE_ORG }}  # Pass the secret here directly
+      #workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}
+      #service_account: ${{ secrets.SERVICE_ACCOUNT }}
