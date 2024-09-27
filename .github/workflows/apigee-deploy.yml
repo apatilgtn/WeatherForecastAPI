@@ -8,12 +8,15 @@ on:
       - 'apiproxy/**'
   workflow_dispatch:
 
+env:
+  PROJECT_ID: 'vital-scout-430808-k8'  # Replace with your actual Google Cloud project ID
+
 jobs:
   setup_and_auth:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # Permission to write ID tokens for Google Cloud authentication.
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -23,7 +26,8 @@ jobs:
         id: auth
         uses: google-github-actions/auth@v2
         with:
-          token_format: 'access_token'
+          #token_format: 'access_token'
+          project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}'
           service_account: '${{ secrets.SERVICE_ACCOUNT }}'
 
@@ -31,11 +35,23 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Use gcloud CLI
-        run: gcloud info
+        run: |
+          gcloud info
+          gcloud config list
+          gcloud auth list
+
+      - name: Debug Identity Token
+        run: |
+          echo "GitHub Actor: ${{ github.actor }}"
+          echo "GitHub Repository: ${{ github.repository }}"
+          echo "GitHub Ref: ${{ github.ref }}"
 
   deploy_proxy:
     needs: setup_and_auth
     uses: apatilgtn/apigeex-proxy-ci-cd-main/.github/workflows/Reusable-proxy-deploy.yml@main
+    permissions:
+      contents: read
+      id-token: write
     with:
       proxy_name: 'WeatherForecastAPI'
       dev_env: 'dev'
