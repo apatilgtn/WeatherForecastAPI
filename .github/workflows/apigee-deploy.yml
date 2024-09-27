@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest  # Use the latest Ubuntu runner for this job.
     permissions:
       contents: read  # Read access to the repository contents.
-      id-token: none  # Write access for ID tokens.
+      id-token: write  # Write access for ID tokens.
 
     steps:
     - name: Checkout code
