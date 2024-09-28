@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # Step to check out the code in the repository.
+        uses: actions/checkout@v3  # Step to check out the code in the repository.
 
       - name: Authenticate to Google Cloud
         id: auth  # ID for this step to reference outputs later.
@@ -31,6 +31,12 @@ jobs:
           token_format: 'access_token'  # Specify the token format.
           workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_POOL_ID }}'  # Use a secret for the workload identity provider.
           service_account: '${{ secrets.SERVICE_ACCOUNT }}'  # Use a secret for the service account.
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2  # Set up Google Cloud SDK for further commands.
+
+      - name: Use gcloud CLI
+        run: gcloud info  # Run a command to show information about the gcloud setup.
 
   deploy_proxy:
     needs: setup_and_auth  # This job depends on the setup_and_auth job to complete successfully.
