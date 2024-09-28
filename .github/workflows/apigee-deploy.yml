@@ -40,7 +40,7 @@ jobs:
 
   deploy_proxy:
     needs: setup_and_auth  # This job depends on the setup_and_auth job to complete successfully.
-    uses: apigeex-proxy-ci-cd-main/.github/workflows/Reusable-proxy-deploy.yml@main  # Reuse the workflow from another repository.
+    uses: ./apigeex-proxy-ci-cd-main/.github/workflows/Reusable-proxy-deploy.yml  # Reuse the workflow from another repository.
     with:
       proxy_name: 'WeatherForecastAPI'  # Name of the API proxy to deploy.
       dev_env: 'dev'  # Development environment name.
