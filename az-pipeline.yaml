@@ -10,7 +10,6 @@ trigger:
       - 'src/**'
       - 'apiproxy/**'
 
-# Enable manual triggers (equivalent to workflow_dispatch)
 parameters:
   - name: proxyName
     type: string
@@ -30,43 +29,45 @@ parameters:
     displayName: 'UAT Environment'
 
 variables:
-  - group: apigee-variables  # Create this variable group with your secrets
-    # Should contain:
-    # - APIGEE_ORG
-    # - WORKLOAD_IDENTITY_POOL_ID
-    # - SERVICE_ACCOUNT
+  - group: apigeex
+
+pool:
+  vmImage: 'ubuntu-latest'
 
 stages:
   - stage: Setup
     displayName: 'Setup and Authentication'
     jobs:
       - job: SetupAndAuth
-        pool:
-          vmImage: 'ubuntu-latest'
         steps:
-          - task: GoogleCloudSdkInstaller@0
-            displayName: 'Install Google Cloud SDK'
-            
+          # Install Google Cloud SDK using direct download
           - task: Bash@3
+            displayName: 'Install Google Cloud SDK'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+                curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+                sudo apt-get update && sudo apt-get install google-cloud-cli
+                
+          - task: Bash@3
+            name: authToGCP
             displayName: 'Authenticate to Google Cloud'
             inputs:
               targetType: 'inline'
               script: |
                 # Create service account key file
-                echo "$(GOOGLE_CREDENTIALS)" > gcp-credentials.json
+                echo "$(SERVICE_ACCOUNT)" > gcp-credentials.json
                 
-                # Authenticate using workload identity
-                gcloud auth login --cred-file=gcp-credentials.json
+                # Authenticate using service account
+                gcloud auth activate-service-account --key-file=gcp-credentials.json
                 
-                # Set project and verify authentication
+                # Set project
                 gcloud config set project $(APIGEE_ORG)
-                gcloud info
                 
                 # Get access token for later use
                 ACCESS_TOKEN=$(gcloud auth print-access-token)
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$ACCESS_TOKEN"
-            env:
-              GOOGLE_CREDENTIALS: $(SERVICE_ACCOUNT)
 
   - stage: DeployProxy
     displayName: 'Deploy Apigee Proxy'
@@ -74,7 +75,7 @@ stages:
     variables:
       ACCESS_TOKEN: $[ stageDependencies.Setup.SetupAndAuth.outputs['authToGCP.ACCESS_TOKEN'] ]
     jobs:
-      - job: PrepareDeploy
+      - job: DeployToEnvironments
         steps:
           - task: Bash@3
             displayName: 'Install apigeecli'
