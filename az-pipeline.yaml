@@ -1,0 +1,179 @@
+name: Apigee Proxy Deployment
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'src/**'
+      - 'apiproxy/**'
+
+# Enable manual triggers (equivalent to workflow_dispatch)
+parameters:
+  - name: proxyName
+    type: string
+    default: 'WeatherForecastAPI'
+    displayName: 'API Proxy Name'
+  - name: devEnv
+    type: string
+    default: 'dev'
+    displayName: 'Development Environment'
+  - name: testEnv
+    type: string
+    default: 'test'
+    displayName: 'Test Environment'
+  - name: uatEnv
+    type: string
+    default: 'uat'
+    displayName: 'UAT Environment'
+
+variables:
+  - group: apigee-variables  # Create this variable group with your secrets
+    # Should contain:
+    # - APIGEE_ORG
+    # - WORKLOAD_IDENTITY_POOL_ID
+    # - SERVICE_ACCOUNT
+
+stages:
+  - stage: Setup
+    displayName: 'Setup and Authentication'
+    jobs:
+      - job: SetupAndAuth
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: GoogleCloudSdkInstaller@0
+            displayName: 'Install Google Cloud SDK'
+            
+          - task: Bash@3
+            displayName: 'Authenticate to Google Cloud'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Create service account key file
+                echo "$(GOOGLE_CREDENTIALS)" > gcp-credentials.json
+                
+                # Authenticate using workload identity
+                gcloud auth login --cred-file=gcp-credentials.json
+                
+                # Set project and verify authentication
+                gcloud config set project $(APIGEE_ORG)
+                gcloud info
+                
+                # Get access token for later use
+                ACCESS_TOKEN=$(gcloud auth print-access-token)
+                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$ACCESS_TOKEN"
+            env:
+              GOOGLE_CREDENTIALS: $(SERVICE_ACCOUNT)
+
+  - stage: DeployProxy
+    displayName: 'Deploy Apigee Proxy'
+    dependsOn: Setup
+    variables:
+      ACCESS_TOKEN: $[ stageDependencies.Setup.SetupAndAuth.outputs['authToGCP.ACCESS_TOKEN'] ]
+    jobs:
+      - job: PrepareDeploy
+        steps:
+          - task: Bash@3
+            displayName: 'Install apigeecli'
+            inputs:
+              targetType: 'inline'
+              script: |
+                curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+                echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+
+          - task: ArchiveFiles@2
+            displayName: 'Create API Bundle'
+            inputs:
+              rootFolderOrFile: '$(Build.SourcesDirectory)/apiproxy'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+
+          - task: Bash@3
+            name: deployToDev
+            displayName: 'Deploy to Dev'
+            inputs:
+              targetType: 'inline'
+              script: |
+                apigeecli apis create bundle \
+                  -n "${{ parameters.proxyName }}" \
+                  -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
+                  --org "$(APIGEE_ORG)" \
+                  --token "$(ACCESS_TOKEN)" \
+                  --env "${{ parameters.devEnv }}" \
+                  --ovr \
+                  --wait
+
+          - task: Bash@3
+            name: deployToTest
+            displayName: 'Deploy to Test'
+            condition: succeeded()
+            inputs:
+              targetType: 'inline'
+              script: |
+                apigeecli apis deploy \
+                  --name "${{ parameters.proxyName }}" \
+                  --org "$(APIGEE_ORG)" \
+                  --env "${{ parameters.testEnv }}" \
+                  --token "$(ACCESS_TOKEN)" \
+                  --ovr \
+                  --wait
+
+          - task: Bash@3
+            name: deployToUAT
+            displayName: 'Deploy to UAT'
+            condition: succeeded()
+            inputs:
+              targetType: 'inline'
+              script: |
+                apigeecli apis deploy \
+                  --name "${{ parameters.proxyName }}" \
+                  --org "$(APIGEE_ORG)" \
+                  --env "${{ parameters.uatEnv }}" \
+                  --token "$(ACCESS_TOKEN)" \
+                  --ovr \
+                  --wait
+
+  - stage: Summary
+    displayName: 'Deployment Summary'
+    dependsOn: DeployProxy
+    condition: always()
+    jobs:
+      - job: GenerateSummary
+        steps:
+          - task: Bash@3
+            displayName: 'Generate Summary'
+            inputs:
+              targetType: 'inline'
+              script: |
+                {
+                  echo "# Apigee Proxy Deployment Summary"
+                  echo
+                  echo "## Deployment Details"
+                  echo "| Parameter | Value |"
+                  echo "|-----------|--------|"
+                  echo "| Proxy Name | ${{ parameters.proxyName }} |"
+                  echo "| Dev Environment | ${{ parameters.devEnv }} |"
+                  echo "| Test Environment | ${{ parameters.testEnv }} |"
+                  echo "| UAT Environment | ${{ parameters.uatEnv }} |"
+                  
+                  echo
+                  echo "## Deployment Status"
+                  echo "| Environment | Status |"
+                  echo "|-------------|--------|"
+                  for ENV in "Dev" "Test" "UAT"; do
+                    if [[ "$(AGENT.JOBSTATUS)" == "Succeeded" ]]; then
+                      echo "| $ENV | ✅ Success |"
+                    else
+                      echo "| $ENV | ❌ Failed |"
+                    fi
+                  done
+                } > $(Build.ArtifactStagingDirectory)/deployment-summary.md
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
+              artifactName: 'DeploymentSummary'
