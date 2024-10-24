@@ -27,12 +27,18 @@ parameters:
     type: string
     default: 'uat'
     displayName: 'UAT Environment'
+    
+
 
 variables:
   - group: apigeex
 
 pool:
-  vmImage: 'windows-latest'  # Changed to windows-latest for free tier
+  vmImage: 'windows-2019'    # Specific Windows version for hosted agent
+  demands:
+    - msbuild
+    - visualstudio
+    - vstest'  # Changed to windows-latest for free tier
 
 stages:
   - stage: Setup
