@@ -32,7 +32,7 @@ variables:
   - group: apigeex
 
 pool:
-  vmImage: 'ubuntu-latest'
+  vmImage: 'windows-latest'
 
 stages:
   - stage: Setup
