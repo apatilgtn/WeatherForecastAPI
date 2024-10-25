@@ -1,3 +1,5 @@
+name: Apigee Deployment Pipeline
+
 trigger: none # Disable automatic triggers
 
 parameters:
@@ -25,10 +27,12 @@ parameters:
 variables:
   - group: apigeeX
 
-- job: GCP_Auth
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: GCP_Auth
     displayName: 'GCP Authentication'
-    pool:
-      vmImage: ubuntu-latest
     steps:
       - task: PowerShell@2
         name: authToGCP
@@ -41,13 +45,16 @@ variables:
                 
                 # Install Google Cloud SDK
                 Write-Host "Installing Google Cloud SDK..."
-                $installScript = @"
-                    sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
-                    echo 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-                    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
-                    sudo apt-get update && sudo apt-get install -y google-cloud-cli
-"@
-                bash -c $installScript
+                $installScript = '
+                    apt-get update && apt-get install -y apt-transport-https ca-certificates gnupg
+                    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+                    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+                    apt-get update && apt-get install -y google-cloud-cli
+                '
+                
+                # Create temp directory for credentials
+                $credPath = Join-Path $env:TEMP "gcp-auth"
+                New-Item -ItemType Directory -Force -Path $credPath | Out-Null
                 
                 # Create Workload Identity configuration
                 Write-Host "Creating Workload Identity configuration..."
@@ -57,22 +64,31 @@ variables:
                     subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
                     token_url = "https://sts.googleapis.com/v1/token"
                     credential_source = @{
-                        file = "azure-token.txt"
+                        file = Join-Path $credPath "azure-token.txt"
                     }
                     service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com:generateAccessToken"
                 }
                 
                 # Save Azure token
                 Write-Host "Saving Azure token..."
-                $env:AZURE_TOKEN | Out-File -FilePath "azure-token.txt"
+                $tokenPath = Join-Path $credPath "azure-token.txt"
+                $env:AZURE_TOKEN | Out-File -FilePath $tokenPath -Force
                 
                 # Save configuration
                 Write-Host "Saving credential configuration..."
-                $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath "config.json"
+                $configPath = Join-Path $credPath "config.json"
+                $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath $configPath -Force
+                
+                # Set GOOGLE_APPLICATION_CREDENTIALS
+                $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
                 
                 # Authenticate
                 Write-Host "Authenticating with GCP..."
-                gcloud auth login --cred-file="config.json"
+                $authResult = gcloud auth login --cred-file="$configPath" --quiet
+                
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to authenticate with GCP"
+                }
                 
                 # Get and store access token
                 Write-Host "Getting access token..."
@@ -91,9 +107,10 @@ variables:
                 exit 1
             }
             finally {
-                # Cleanup sensitive files
-                if (Test-Path "azure-token.txt") { Remove-Item "azure-token.txt" }
-                if (Test-Path "config.json") { Remove-Item "config.json" }
+                # Cleanup
+                if (Test-Path $credPath) {
+                    Remove-Item -Path $credPath -Recurse -Force
+                }
             }
         env:
           AZURE_TOKEN: $(System.AccessToken)
@@ -111,8 +128,6 @@ variables:
   - job: ApigeeLint
     displayName: 'Lint Apigee Proxy'
     dependsOn: GCP_Auth
-    pool:
-      vmImage: ubuntu-latest
     steps:
       - task: NodeTool@0
         inputs:
@@ -130,8 +145,6 @@ variables:
   - job: PrepareAndUpload
     displayName: 'Prepare and Upload Bundle'
     dependsOn: [GCP_Auth, ApigeeLint]
-    pool:
-      vmImage: ubuntu-latest
     variables:
       ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
     steps:
@@ -322,13 +335,13 @@ variables:
     displayName: 'Generate Deployment Summary'
     dependsOn: [ApigeeLint, PrepareAndUpload, DeployToDev, DeployToTest, DeployToUat, CleanupRevisions]
     condition: always()
+    pool:
+      vmImage: ubuntu-latest
     variables:
       LATEST_REVISION: $[ dependencies.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
       KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
       DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
       FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
-    pool:
-      vmImage: ubuntu-latest
     steps:
       - task: PowerShell@2
         displayName: 'Generate Summary'
@@ -353,9 +366,17 @@ variables:
             | Revisions Kept | $(KEPT_COUNT) |
             | Revisions Deleted | $(DELETED_COUNT) |
             | Cleanup Status | $(if ('$(DELETED_COUNT)' -gt 0) { if ('$(FAILED_COUNT)' -eq 0) { "✅ Successfully deleted $(DELETED_COUNT) revision(s)" } else { "⚠️ Deleted $(DELETED_COUNT) revision(s) with $(FAILED_COUNT) failure(s)" } } else { "ℹ️ No cleanup needed" }) |
+            
+            ## Additional Details
+            - Build Number: $(Build.BuildNumber)
+            - Pipeline Run: $(Build.BuildId)
+            - Trigger Type: $(Build.Reason)
+            - Repository: $(Build.Repository.Name)
+            - Branch: $(Build.SourceBranchName)
             "@
             
             $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
+            Write-Host "Deployment summary generated successfully"
 
       - task: PublishBuildArtifacts@1
         condition: always()
