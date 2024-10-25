@@ -1,4 +1,4 @@
-name: Apigee Deployment Pipeline
+# Name: Apigee Deployment Pipeline
 
 trigger: none # Disable automatic triggers
 
@@ -51,7 +51,7 @@ stages:
               script: |
                 try {
                     Write-Host "Starting GCP Authentication..."
-                    
+
                     # Install Google Cloud SDK
                     Write-Host "Installing Google Cloud SDK..."
                     $installScript = @"
@@ -60,21 +60,20 @@ stages:
                     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
                     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
                     sudo apt-get update && sudo apt-get install -y google-cloud-cli
-"@
-                    
-                    # Execute installation script
+                    "@
+
                     bash -c $installScript
                     if ($LASTEXITCODE -ne 0) {
                         throw "Failed to install Google Cloud SDK"
                     }
-                    
+
                     # Create temp directory for credentials
                     $credPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "gcp-auth"
                     Write-Host "Creating credential directory at: $credPath"
                     if (!(Test-Path -Path $credPath)) {
                         New-Item -ItemType Directory -Force -Path $credPath | Out-Null
                     }
-                    
+
                     # Create Workload Identity configuration
                     Write-Host "Creating Workload Identity configuration..."
                     $configContent = @{
@@ -87,36 +86,36 @@ stages:
                         }
                         service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$($env:SERVICE_ACCOUNT):generateAccessToken"
                     }
-                    
+
                     # Save Azure token
                     Write-Host "Saving Azure token..."
                     $tokenPath = Join-Path -Path $credPath -ChildPath "azure-token.txt"
                     $env:AZURE_TOKEN | Out-File -FilePath $tokenPath -Force
-                    
+
                     # Save configuration
                     Write-Host "Saving credential configuration..."
                     $configPath = Join-Path -Path $credPath -ChildPath "config.json"
                     $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath $configPath -Force
-                    
+
                     # Set GOOGLE_APPLICATION_CREDENTIALS
                     $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
                     Write-Host "Using config file: $configPath"
-                    
+
                     # Authenticate
                     Write-Host "Authenticating with GCP..."
                     gcloud auth login --cred-file="$configPath" --quiet
-                    
+
                     if ($LASTEXITCODE -ne 0) {
                         throw "Failed to authenticate with GCP"
                     }
-                    
+
                     # Get and store access token
                     Write-Host "Getting access token..."
                     $accessToken = gcloud auth print-access-token
                     if ([string]::IsNullOrEmpty($accessToken)) {
                         throw "Failed to get access token"
                     }
-                    
+
                     Write-Host "Setting access token as pipeline variable..."
                     Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
                     Write-Host "Authentication successful"
@@ -251,6 +250,7 @@ stages:
                 - template: templates/deploy-steps.yml@templates
                   parameters:
                     environmentName: ${{ parameters.uatEnv }}
+
 
 
   - stage: Cleanup
