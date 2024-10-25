@@ -25,8 +25,7 @@ parameters:
 variables:
   - group: apigeeX
 
-jobs:
-  - job: GCP_Auth
+- job: GCP_Auth
     displayName: 'GCP Authentication'
     pool:
       vmImage: ubuntu-latest
@@ -38,45 +37,44 @@ jobs:
           targetType: 'inline'
           script: |
             try {
-                Write-Host "Authenticating using Workload Identity Federation..."
+                Write-Host "Starting GCP Authentication..."
                 
-                # Debug variables
-                Write-Host "Checking variables..."
-                Write-Host "WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)"
-                Write-Host "SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)"
-                
-                # Verify variables are present
-                if ([string]::IsNullOrEmpty("$(WORKLOAD_IDENTITY_PROVIDER)")) {
-                    throw "WORKLOAD_IDENTITY_PROVIDER is not set"
-                }
-                if ([string]::IsNullOrEmpty("$(SERVICE_ACCOUNT)")) {
-                    throw "SERVICE_ACCOUNT is not set"
-                }
-
                 # Install Google Cloud SDK
                 Write-Host "Installing Google Cloud SDK..."
-                $installScript = "
+                $installScript = @"
                     sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
                     echo 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
                     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
                     sudo apt-get update && sudo apt-get install -y google-cloud-cli
-                "
+"@
                 bash -c $installScript
                 
-                # Configure Workload Identity Federation
-                Write-Host "Configuring Workload Identity Federation..."
-                $configCommand = "gcloud iam workload-identity-pools create-cred-config '$(WORKLOAD_IDENTITY_PROVIDER)' \
-                    --service-account='$(SERVICE_ACCOUNT)' \
-                    --output-file=credential.json \
-                    --credential-source-type='azure'"
-                    
-                bash -c $configCommand
+                # Create Workload Identity configuration
+                Write-Host "Creating Workload Identity configuration..."
+                $configContent = @{
+                    type = "external_account"
+                    audience = "//iam.googleapis.com/projects/69986464585/locations/global/workloadIdentityPools/az-pool"
+                    subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
+                    token_url = "https://sts.googleapis.com/v1/token"
+                    credential_source = @{
+                        file = "azure-token.txt"
+                    }
+                    service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com:generateAccessToken"
+                }
                 
-                # Activate credentials
-                Write-Host "Activating credentials..."
-                gcloud auth login --cred-file=credential.json
+                # Save Azure token
+                Write-Host "Saving Azure token..."
+                $env:AZURE_TOKEN | Out-File -FilePath "azure-token.txt"
                 
-                # Get access token
+                # Save configuration
+                Write-Host "Saving credential configuration..."
+                $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath "config.json"
+                
+                # Authenticate
+                Write-Host "Authenticating with GCP..."
+                gcloud auth login --cred-file="config.json"
+                
+                # Get and store access token
                 Write-Host "Getting access token..."
                 $accessToken = gcloud auth print-access-token
                 if ([string]::IsNullOrEmpty($accessToken)) {
@@ -92,10 +90,13 @@ jobs:
                 Write-Host "##[error]Error details: $($_.Exception.Message)"
                 exit 1
             }
+            finally {
+                # Cleanup sensitive files
+                if (Test-Path "azure-token.txt") { Remove-Item "azure-token.txt" }
+                if (Test-Path "config.json") { Remove-Item "config.json" }
+            }
         env:
-          WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)
-          SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)
-          GCP_PROJECT_ID: $(GCP_PROJECT_ID)
+          AZURE_TOKEN: $(System.AccessToken)
 
       - task: Bash@3
         displayName: 'Verify Authentication'
