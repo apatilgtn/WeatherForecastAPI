@@ -12,7 +12,7 @@ parameters:
   - name: devEnv
     type: string
     displayName: 'Development Environment'
-    default: 'dev'
+    default: 'test-env'
   - name: testEnv
     type: string
     displayName: 'Test Environment'
