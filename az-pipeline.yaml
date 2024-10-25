@@ -116,6 +116,9 @@ jobs:
                             type = "text"
                         }
                     }
+                    workforce_pool_user_project = "$(GCP_PROJECT)"
+                    # Add issuer configuration
+                    issuer_uri = "https://vstoken.dev.azure.com/$(System.TeamProject)"
                 }
                 
                 # Save config to file
@@ -130,7 +133,11 @@ jobs:
                 Write-Host "Config (sanitized):"
                 Write-Host ($debugConfig | ConvertTo-Json -Depth 10)
                 
+                # Set required environment variables
+                $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
+                
                 # Authenticate using the configuration file
+                Write-Host "Attempting to authenticate..."
                 gcloud auth login --cred-file="$configPath" --brief
                 
                 if ($LASTEXITCODE -ne 0) {
@@ -138,6 +145,7 @@ jobs:
                 }
                 
                 # Get and store access token
+                Write-Host "Getting access token..."
                 $ACCESS_TOKEN = gcloud auth print-access-token
                 if ($LASTEXITCODE -ne 0) {
                     throw "Failed to get access token"
@@ -164,7 +172,6 @@ jobs:
                     Remove-Item $tokenPath -Force
                 }
             }
-
       - task: NodeTool@0
         inputs:
           versionSpec: '20.x'
