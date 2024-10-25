@@ -25,8 +25,7 @@ parameters:
 variables:
   - group: apigeeX # Variable group containing: WORKLOAD_IDENTITY_PROVIDER, SERVICE_ACCOUNT, APIGEE_ORG
 
-jobs:
-  - job: GCP_Auth
+- job: GCP_Auth
     displayName: 'GCP Authentication'
     pool:
       vmImage: ubuntu-latest
@@ -40,18 +39,23 @@ jobs:
             try {
                 Write-Host "Authenticating using Workload Identity Federation..."
                 
+                # Debug variables
+                Write-Host "Checking variables..."
+                Write-Host "WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)"
+                Write-Host "SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)"
+                
                 # Verify variables are present
-                if ([string]::IsNullOrEmpty($env:WORKLOAD_IDENTITY_PROVIDER)) {
+                if ([string]::IsNullOrEmpty("$(WORKLOAD_IDENTITY_PROVIDER)")) {
                     throw "WORKLOAD_IDENTITY_PROVIDER is not set"
                 }
-                if ([string]::IsNullOrEmpty($env:SERVICE_ACCOUNT)) {
+                if ([string]::IsNullOrEmpty("$(SERVICE_ACCOUNT)")) {
                     throw "SERVICE_ACCOUNT is not set"
                 }
 
                 # Install Google Cloud SDK
                 Write-Host "Installing Google Cloud SDK..."
                 $installScript = "
-                    sudo apt-get install -y apt-transport-https ca-certificates gnupg
+                    sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
                     echo 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
                     curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
                     sudo apt-get update && sudo apt-get install -y google-cloud-cli
@@ -60,16 +64,20 @@ jobs:
                 
                 # Configure Workload Identity Federation
                 Write-Host "Configuring Workload Identity Federation..."
-                bash -c "gcloud auth configure-workload-identity-pool `
-                    --project='$(GCP_PROJECT_ID)' `
-                    --provider='$(WORKLOAD_IDENTITY_PROVIDER)' `
-                    --service-account='$(SERVICE_ACCOUNT)' `
-                    --location='global' `
-                    --create-credential-config-file='credential.json'"
+                $configCommand = "gcloud iam workload-identity-pools create-cred-config '$(WORKLOAD_IDENTITY_PROVIDER)' \
+                    --service-account='$(SERVICE_ACCOUNT)' \
+                    --output-file=credential.json \
+                    --credential-source-type='azure'"
+                    
+                bash -c $configCommand
+                
+                # Activate credentials
+                Write-Host "Activating credentials..."
+                gcloud auth login --cred-file=credential.json
                 
                 # Get access token
                 Write-Host "Getting access token..."
-                $accessToken = bash -c "gcloud auth print-access-token"
+                $accessToken = gcloud auth print-access-token
                 if ([string]::IsNullOrEmpty($accessToken)) {
                     throw "Failed to get access token"
                 }
@@ -83,6 +91,10 @@ jobs:
                 Write-Host "##[error]Error details: $($_.Exception.Message)"
                 exit 1
             }
+        env:
+          WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)
+          SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)
+          GCP_PROJECT_ID: $(GCP_PROJECT_ID)
 
       - task: Bash@3
         displayName: 'Verify Authentication'
