@@ -1,4 +1,4 @@
-trigger: none # Disable automatic triggers - use pipeline parameters instead
+trigger: none # Disable automatic triggers
 
 parameters:
   - name: proxyName
@@ -23,9 +23,9 @@ parameters:
     default: true
 
 variables:
-  - group: apigeeX # Variable group containing secrets
+  - group: apigeeX
   - name: GCLOUD_VERSION
-    value: '446.0.0' # Specify Google Cloud SDK version for consistency
+    value: '446.0.0'
 
 pool:
   vmImage: 'windows-2019'
@@ -34,7 +34,6 @@ jobs:
   - job: ApigeeDeployment
     displayName: 'Apigee Deployment Process'
     steps:
-      # Validate Parameters
       - task: PowerShell@2
         displayName: 'Validate Parameters'
         inputs:
@@ -49,7 +48,6 @@ jobs:
                 exit 1
             }
 
-      # Install Google Cloud SDK with version control
       - task: PowerShell@2
         displayName: 'Install Google Cloud SDK'
         inputs:
@@ -76,63 +74,60 @@ jobs:
             gcloud config set disable_usage_reporting true
             gcloud config set component_manager/disable_update_check true
 
-      # Authenticate to GCP
-- task: PowerShell@2
-  name: authToGCP
-  displayName: 'Authenticate to GCP'
-  inputs:
-    targetType: 'inline'
-    script: |
-      try {
-          # Check if credentials exist
-          if ([string]::IsNullOrEmpty($env:GOOGLE_CREDENTIALS)) {
-              Write-Error "GOOGLE_CREDENTIALS environment variable is not set. Please make sure it's configured in the variable group."
-              exit 1
-          }
+      - task: PowerShell@2
+        name: authToGCP
+        displayName: 'Authenticate to GCP'
+        inputs:
+          targetType: 'inline'
+          script: |
+            try {
+                # Check if credentials exist
+                if ([string]::IsNullOrEmpty($env:GOOGLE_CREDENTIALS)) {
+                    Write-Error "GOOGLE_CREDENTIALS environment variable is not set"
+                    exit 1
+                }
 
-          # Create credentials file
-          $credentialsPath = Join-Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY "gcp-credentials.json"
-          $env:GOOGLE_CREDENTIALS | Out-File -FilePath $credentialsPath -Encoding UTF8
-          
-          Write-Host "Authenticating to GCP..."
-          
-          # Verify the credentials file exists and has content
-          if (-not (Test-Path $credentialsPath) -or (Get-Item $credentialsPath).Length -eq 0) {
-              Write-Error "Credentials file was not created properly"
-              exit 1
-          }
-          
-          # Authenticate using the service account
-          gcloud auth activate-service-account --key-file=$credentialsPath
-          
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Failed to authenticate with GCP"
-              exit 1
-          }
-          
-          # Get and store access token
-          $ACCESS_TOKEN = gcloud auth print-access-token
-          Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
-          
-          # Verify authentication
-          Write-Host "Verifying authentication..."
-          gcloud auth list
-          
-          # Clean up credentials file
-          Remove-Item $credentialsPath -Force
-      }
-      catch {
-          Write-Error "Authentication failed: $_"
-          exit 1
-      }
+                # Create credentials file
+                $credentialsPath = Join-Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY "gcp-credentials.json"
+                $env:GOOGLE_CREDENTIALS | Out-File -FilePath $credentialsPath -Encoding UTF8
+                
+                Write-Host "Authenticating to GCP..."
+                
+                # Verify the credentials file exists and has content
+                if (-not (Test-Path $credentialsPath) -or (Get-Item $credentialsPath).Length -eq 0) {
+                    Write-Error "Credentials file was not created properly"
+                    exit 1
+                }
+                
+                # Authenticate using the service account
+                gcloud auth activate-service-account --key-file=$credentialsPath
+                
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Failed to authenticate with GCP"
+                    exit 1
+                }
+                
+                # Get and store access token
+                $ACCESS_TOKEN = gcloud auth print-access-token
+                Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
+                
+                # Verify authentication
+                Write-Host "Verifying authentication..."
+                gcloud auth list
+                
+                # Clean up credentials file
+                Remove-Item $credentialsPath -Force
+            }
+            catch {
+                Write-Error "Authentication failed: $_"
+                exit 1
+            }
 
-      # Install Node.js and Apigee Lint
       - task: NodeTool@0
         inputs:
           versionSpec: '20.x'
         displayName: 'Install Node.js'
 
-      # Run Quality Checks with detailed reporting
       - task: PowerShell@2
         displayName: 'Run Apigee Lint'
         inputs:
@@ -153,21 +148,16 @@ jobs:
                 exit 1
             }
 
-      # Install apigeecli with version check
       - task: PowerShell@2
         displayName: 'Install apigeecli'
         inputs:
           targetType: 'inline'
           script: |
-            # Download and install apigeecli
             Invoke-WebRequest -Uri "https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh" -OutFile "downloadLatest.sh"
             bash downloadLatest.sh
             $env:PATH += ";$env:USERPROFILE\.apigeecli\bin"
-            
-            # Verify installation
             apigeecli version
 
-      # Create API Bundle with validation
       - task: ArchiveFiles@2
         displayName: 'Create API Bundle'
         inputs:
@@ -176,7 +166,6 @@ jobs:
           archiveType: 'zip'
           archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
 
-      # Upload and Deploy Bundle with enhanced error handling
       - task: PowerShell@2
         name: uploadAndDeploy
         displayName: 'Upload and Deploy Bundle'
@@ -216,7 +205,6 @@ jobs:
                 }
             }
             
-            # Upload bundle
             try {
                 $IMPORT_OUTPUT = apigeecli apis create bundle `
                     -n "${{ parameters.proxyName }}" `
@@ -248,7 +236,6 @@ jobs:
                 exit 1
             }
 
-      # Enhanced Summary Generation
       - task: PowerShell@2
         displayName: 'Generate Summary'
         condition: always()
@@ -281,7 +268,6 @@ jobs:
             
             $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
 
-      # Publish Summary
       - task: PublishBuildArtifacts@1
         condition: always()
         inputs:
