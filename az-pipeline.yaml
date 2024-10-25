@@ -50,87 +50,46 @@ stages:
               targetType: 'inline'
               script: |
                 try {
-                  Write-Host "Starting GCP Authentication..."
-                  
-                  # Install Google Cloud SDK
-                  Write-Host "Installing Google Cloud SDK..."
-                  $installScript = @"
-                  sudo apt-get update && \
-                  sudo apt-get install -y apt-transport-https ca-certificates gnupg curl && \
-                  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
-                  curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
-                  sudo apt-get update && sudo apt-get install -y google-cloud-cli
-                  "@
+                    Write-Host "Starting GCP Authentication..."
 
-                  bash -c $installScript
-                  if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to install Google Cloud SDK"
-                  }
+                     # Set the GOOGLE_APPLICATION_CREDENTIALS environment variable
+                         $serviceAccountJsonPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "service-account.json"
+                         $env:GOOGLE_APPLICATION_CREDENTIALS = $serviceAccountJsonPath
+                         Write-Host "Using service account JSON file: $serviceAccountJsonPath"
 
-                  # Create temp directory for credentials
-                  $credPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "gcp-auth"
-                  Write-Host "Creating credential directory at: $credPath"
-                  if (!(Test-Path -Path $credPath)) {
-                    New-Item -ItemType Directory -Force -Path $credPath | Out-Null
-                  }
+                           # Write the service account JSON to a file
+                           $env:GCP_SERVICE_ACCOUNT_JSON | Out-File -FilePath $serviceAccountJsonPath -Force
 
-                  # Create Workload Identity configuration
-                  Write-Host "Creating Workload Identity configuration..."
-                  $configContent = @{
-                    type = "external_account"
-                    audience = "//iam.googleapis.com/$($env:WORKLOAD_IDENTITY_PROVIDER)"
-                    subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
-                    token_url = "https://sts.googleapis.com/v1/token"
-                    credential_source = @{
-                      file = Join-Path -Path $credPath -ChildPath "azure-token.txt"
-                    }
-                    service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$($env:SERVICE_ACCOUNT):generateAccessToken"
-                  }
+                         # Authenticate with GCP using the service account
+                          Write-Host "Authenticating with GCP using service account..."
+                         gcloud auth activate-service-account --key-file="$serviceAccountJsonPath"
 
-                  # Save Azure token
-                  Write-Host "Saving Azure token..."
-                  $tokenPath = Join-Path -Path $credPath -ChildPath "azure-token.txt"
-                  $env:AZURE_TOKEN | Out-File -FilePath $tokenPath -Force
+                           if ($LASTEXITCODE -ne 0) {
+                              throw "Failed to authenticate with GCP using service account"
+                              }
 
-                  # Save configuration
-                  Write-Host "Saving credential configuration..."
-                  $configPath = Join-Path -Path $credPath -ChildPath "config.json"
-                  $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath $configPath -Force
+                            # Get and store access token
+                              Write-Host "Getting access token..."
+                                   $accessToken = gcloud auth print-access-token
+                                   if ([string]::IsNullOrEmpty($accessToken)) {
+                                      throw "Failed to get access token"
+                                       }
 
-                  # Set GOOGLE_APPLICATION_CREDENTIALS
-                  $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
-                  Write-Host "Using config file: $($env:GOOGLE_APPLICATION_CREDENTIALS)"
-
-                  # Authenticate
-                  Write-Host "Authenticating with GCP..."
-                  gcloud auth login --cred-file="$configPath" --quiet
-
-                  if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to authenticate with GCP"
-                  }
-
-                  # Get and store access token
-                  Write-Host "Getting access token..."
-                  $accessToken = gcloud auth print-access-token
-                  if ([string]::IsNullOrEmpty($accessToken)) {
-                    throw "Failed to get access token"
-                  }
-
-                  Write-Host "Setting access token as pipeline variable..."
-                  Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
-                  Write-Host "Authentication successful"
-                }
-                catch {
-                  Write-Error "Authentication failed: $_"
-                  Write-Host "##[error]Error details: $($_.Exception.Message)"
-                  Write-Host "##[error]Stack trace: $($_.ScriptStackTrace)"
-                  exit 1
-                }
-                finally {
-                  if ($credPath -and (Test-Path -Path $credPath)) {
-                    Remove-Item -Path $credPath -Recurse -Force
-                  }
-                }
+                               Write-Host "Setting access token as pipeline variable..."
+                                 Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
+                                  Write-Host "Authentication successful"
+                                  }
+                                    catch {
+                                 Write-Error "Authentication failed: $_"
+                                 Write-Host "##[error]Error details: $($_.Exception.Message)"
+                                   Write-Host "##[error]Stack trace: $($_.ScriptStackTrace)"
+                                     exit 1
+                                    }
+                                finally {
+                                   if (Test-Path -Path $serviceAccountJsonPath) {
+                                      Remove-Item -Path $serviceAccountJsonPath -Force
+                                            }
+                                        }
             env:
               AZURE_TOKEN: $(System.AccessToken)
               WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)
