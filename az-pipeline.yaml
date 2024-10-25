@@ -4,26 +4,28 @@ parameters:
   - name: proxyName
     type: string
     displayName: 'API Proxy Name'
-    default: true
+    default: ''
   - name: proxyDirectory
     type: string
     displayName: 'Proxy Directory'
     default: 'apiproxy'
-  - name: devEnv
-    type: string
-    displayName: 'Development Environment'
+  - name: deployToDev
+    type: boolean
+    displayName: 'Deploy to Dev Environment'
     default: true
-  - name: testEnv
-    type: string
-    displayName: 'Test Environment'
+  - name: deployToTest
+    type: boolean
+    displayName: 'Deploy to Test Environment'
     default: true
-  - name: uatEnv
-    type: string
-    displayName: 'UAT Environment'
+  - name: deployToUat
+    type: boolean
+    displayName: 'Deploy to UAT Environment'
     default: true
 
 variables:
-  - group: apigeeX # Create this variable group in Azure with your secrets
+  - group: apigeeX # Variable group containing secrets
+  - name: GCLOUD_VERSION
+    value: '446.0.0' # Specify Google Cloud SDK version for consistency
 
 pool:
   vmImage: 'windows-2019'
@@ -32,26 +34,93 @@ jobs:
   - job: ApigeeDeployment
     displayName: 'Apigee Deployment Process'
     steps:
-      # Install Google Cloud SDK
+      # Validate Parameters
+      - task: PowerShell@2
+        displayName: 'Validate Parameters'
+        inputs:
+          targetType: 'inline'
+          script: |
+            if ([string]::IsNullOrEmpty("${{ parameters.proxyName }}")) {
+                Write-Error "Proxy name is required"
+                exit 1
+            }
+            if (-not (Test-Path "${{ parameters.proxyDirectory }}")) {
+                Write-Error "Proxy directory '${{ parameters.proxyDirectory }}' not found"
+                exit 1
+            }
+
+      # Install Google Cloud SDK with version control
       - task: PowerShell@2
         displayName: 'Install Google Cloud SDK'
         inputs:
           targetType: 'inline'
           script: |
-            (New-Object Net.WebClient).DownloadFile("https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe", "$env:Temp\GoogleCloudSDKInstaller.exe")
-            & $env:Temp\GoogleCloudSDKInstaller.exe /S /allusers /noreporting /nodesktop /noconsole
+            Write-Host "Installing Google Cloud SDK version $(GCLOUD_VERSION)"
+            
+            # Download specific version
+            $installerUrl = "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$(GCLOUD_VERSION)-windows-x86_64-bundled-python.zip"
+            $installerPath = "$env:TEMP\google-cloud-sdk.zip"
+            
+            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+            Expand-Archive -Path $installerPath -DestinationPath "$env:ProgramFiles"
+            
+            # Add to PATH
+            $env:PATH = "$env:ProgramFiles\google-cloud-sdk\bin;$env:PATH"
+            
+            # Verify installation
+            $gcloudVersion = gcloud version
+            Write-Host "Installed Google Cloud SDK version:"
+            Write-Host $gcloudVersion
+            
+            # Configure SDK settings
+            gcloud config set disable_usage_reporting true
+            gcloud config set component_manager/disable_update_check true
 
-      # Authenticate to GCP
+      # Authenticate to GCP with retry logic
       - task: PowerShell@2
         name: authToGCP
         displayName: 'Authenticate to GCP'
         inputs:
           targetType: 'inline'
           script: |
-            $env:GOOGLE_CREDENTIALS | Out-File gcp-credentials.json
-            gcloud auth activate-service-account --key-file=gcp-credentials.json
-            $ACCESS_TOKEN = gcloud auth print-access-token
-            Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
+            function Retry-Command {
+                param (
+                    [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock,
+                    [int]$MaxAttempts = 3,
+                    [int]$DelaySeconds = 10
+                )
+                
+                $attempt = 1
+                $error.Clear()
+                
+                do {
+                    try {
+                        & $ScriptBlock
+                        return $true
+                    }
+                    catch {
+                        if ($attempt -eq $MaxAttempts) {
+                            throw "Failed after $MaxAttempts attempts: $_"
+                        }
+                        Write-Warning "Attempt $attempt of $MaxAttempts failed. Retrying in $DelaySeconds seconds..."
+                        Start-Sleep -Seconds $DelaySeconds
+                        $attempt++
+                    }
+                } while ($attempt -le $MaxAttempts)
+            }
+            
+            # Write credentials to file securely
+            $env:GOOGLE_CREDENTIALS | ConvertFrom-Json | ConvertTo-Json | Out-File gcp-credentials.json -Encoding UTF8
+            
+            # Authenticate with retry
+            Retry-Command -ScriptBlock {
+                gcloud auth activate-service-account --key-file=gcp-credentials.json
+                $ACCESS_TOKEN = gcloud auth print-access-token
+                Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
+            }
+            
+            # Verify authentication
+            gcloud auth list
 
       # Install Node.js and Apigee Lint
       - task: NodeTool@0
@@ -59,26 +128,42 @@ jobs:
           versionSpec: '20.x'
         displayName: 'Install Node.js'
 
-      # Run Quality Checks
+      # Run Quality Checks with detailed reporting
       - task: PowerShell@2
         displayName: 'Run Apigee Lint'
         inputs:
           targetType: 'inline'
           script: |
             npm install -g apigeelint
-            apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
+            
+            $lintOutput = apigeelint -s ${{ parameters.proxyDirectory }} -f json.js
+            $lintResults = $lintOutput | ConvertFrom-Json
+            
+            $errorCount = ($lintResults | Where-Object { $_.severity -eq 'error' }).Count
+            $warningCount = ($lintResults | Where-Object { $_.severity -eq 'warn' }).Count
+            
+            Write-Host "Found $errorCount errors and $warningCount warnings"
+            
+            if ($errorCount -gt 0) {
+                Write-Error "Linting failed with $errorCount errors"
+                exit 1
+            }
 
-      # Install apigeecli
+      # Install apigeecli with version check
       - task: PowerShell@2
         displayName: 'Install apigeecli'
         inputs:
           targetType: 'inline'
           script: |
+            # Download and install apigeecli
             Invoke-WebRequest -Uri "https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh" -OutFile "downloadLatest.sh"
             bash downloadLatest.sh
             $env:PATH += ";$env:USERPROFILE\.apigeecli\bin"
+            
+            # Verify installation
+            apigeecli version
 
-      # Create API Bundle
+      # Create API Bundle with validation
       - task: ArchiveFiles@2
         displayName: 'Create API Bundle'
         inputs:
@@ -87,128 +172,112 @@ jobs:
           archiveType: 'zip'
           archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
 
-      # Upload and Deploy Bundle
+      # Upload and Deploy Bundle with enhanced error handling
       - task: PowerShell@2
         name: uploadAndDeploy
         displayName: 'Upload and Deploy Bundle'
         inputs:
           targetType: 'inline'
           script: |
-            # Upload bundle
-            $IMPORT_OUTPUT = apigeecli apis create bundle `
-              -n "${{ parameters.proxyName }}" `
-              -p "$(Build.ArtifactStagingDirectory)/proxy.zip" `
-              --org "$(APIGEE_ORG)" `
-              --token "$(ACCESS_TOKEN)"
-            
-            # Get revision number
-            $LATEST_REVISION = ($IMPORT_OUTPUT | Select-String -Pattern '"revision": "(\d+)"').Matches.Groups[1].Value
-            
-            if (-not $LATEST_REVISION) {
-              Write-Error "Failed to get revision number"
-              exit 1
-            }
-            
-            Write-Host "##vso[task.setvariable variable=LATEST_REVISION]$LATEST_REVISION"
-            
-            # Deploy to Dev
-            apigeecli apis deploy `
-              --name "${{ parameters.proxyName }}" `
-              --org "$(APIGEE_ORG)" `
-              --env "${{ parameters.devEnv }}" `
-              --rev "$LATEST_REVISION" `
-              --token "$(ACCESS_TOKEN)" `
-              --ovr `
-              --wait
-            
-            # Deploy to Test
-            apigeecli apis deploy `
-              --name "${{ parameters.proxyName }}" `
-              --org "$(APIGEE_ORG)" `
-              --env "${{ parameters.testEnv }}" `
-              --rev "$LATEST_REVISION" `
-              --token "$(ACCESS_TOKEN)" `
-              --ovr `
-              --wait
-            
-            # Deploy to UAT
-            apigeecli apis deploy `
-              --name "${{ parameters.proxyName }}" `
-              --org "$(APIGEE_ORG)" `
-              --env "${{ parameters.uatEnv }}" `
-              --rev "$LATEST_REVISION" `
-              --token "$(ACCESS_TOKEN)" `
-              --ovr `
-              --wait
-
-      # Cleanup Old Revisions
-      - task: PowerShell@2
-        name: cleanupTask
-        displayName: 'Cleanup Old Revisions'
-        condition: succeeded()
-        inputs:
-          targetType: 'inline'
-          script: |
-            $REVISIONS_JSON = Invoke-RestMethod -Uri "https://apigee.googleapis.com/v1/organizations/$(APIGEE_ORG)/apis/${{ parameters.proxyName }}/revisions" `
-              -Headers @{Authorization="Bearer $(ACCESS_TOKEN)"}
-            
-            $REVISIONS = $REVISIONS_JSON | Sort-Object
-            $TOTAL_REVISIONS = $REVISIONS.Count
-            $KEEP_COUNT = 5
-            $DELETED = 0
-            $FAILED = 0
-            
-            if ($TOTAL_REVISIONS -gt $KEEP_COUNT) {
-              $DELETE_COUNT = $TOTAL_REVISIONS - $KEEP_COUNT
-              
-              for ($i = 0; $i -lt $DELETE_COUNT; $i++) {
-                $REV = $REVISIONS[$i]
-                $RESPONSE = Invoke-WebRequest -Uri "https://apigee.googleapis.com/v1/organizations/$(APIGEE_ORG)/apis/${{ parameters.proxyName }}/revisions/$REV" `
-                  -Method DELETE `
-                  -Headers @{Authorization="Bearer $(ACCESS_TOKEN)"} `
-                  -SkipHttpErrorCheck
+            function Deploy-ToEnvironment {
+                param (
+                    [string]$Environment,
+                    [string]$Revision,
+                    [bool]$Deploy
+                )
                 
-                if ($RESPONSE.StatusCode -eq 200) {
-                  $DELETED++
-                } else {
-                  $FAILED++
+                if (-not $Deploy) {
+                    Write-Host "Skipping deployment to $Environment as per configuration"
+                    return $true
                 }
-              }
+                
+                Write-Host "Deploying to $Environment environment..."
+                
+                try {
+                    apigeecli apis deploy `
+                        --name "${{ parameters.proxyName }}" `
+                        --org "$(APIGEE_ORG)" `
+                        --env "$Environment" `
+                        --rev "$Revision" `
+                        --token "$(ACCESS_TOKEN)" `
+                        --ovr `
+                        --wait
+                    
+                    Write-Host "Successfully deployed to $Environment"
+                    return $true
+                }
+                catch {
+                    Write-Error "Failed to deploy to $Environment: $_"
+                    return $false
+                }
             }
             
-            Write-Host "##vso[task.setvariable variable=KEPT_COUNT]$KEEP_COUNT"
-            Write-Host "##vso[task.setvariable variable=DELETED_COUNT]$DELETED"
-            Write-Host "##vso[task.setvariable variable=FAILED_COUNT]$FAILED"
+            # Upload bundle
+            try {
+                $IMPORT_OUTPUT = apigeecli apis create bundle `
+                    -n "${{ parameters.proxyName }}" `
+                    -p "$(Build.ArtifactStagingDirectory)/proxy.zip" `
+                    --org "$(APIGEE_ORG)" `
+                    --token "$(ACCESS_TOKEN)"
+                
+                $LATEST_REVISION = ($IMPORT_OUTPUT | Select-String -Pattern '"revision": "(\d+)"').Matches.Groups[1].Value
+                
+                if (-not $LATEST_REVISION) {
+                    throw "Failed to get revision number"
+                }
+                
+                Write-Host "##vso[task.setvariable variable=LATEST_REVISION]$LATEST_REVISION"
+                
+                # Deploy to environments based on parameters
+                $devSuccess = Deploy-ToEnvironment -Environment "dev" -Revision $LATEST_REVISION -Deploy ${{ parameters.deployToDev }}
+                $testSuccess = Deploy-ToEnvironment -Environment "test" -Revision $LATEST_REVISION -Deploy ${{ parameters.deployToTest }}
+                $uatSuccess = Deploy-ToEnvironment -Environment "uat" -Revision $LATEST_REVISION -Deploy ${{ parameters.deployToUat }}
+                
+                if ((${{ parameters.deployToDev }} -and -not $devSuccess) -or 
+                    (${{ parameters.deployToTest }} -and -not $testSuccess) -or 
+                    (${{ parameters.deployToUat }} -and -not $uatSuccess)) {
+                    throw "One or more deployments failed"
+                }
+            }
+            catch {
+                Write-Error $_
+                exit 1
+            }
 
-      # Generate Summary
+      # Enhanced Summary Generation
       - task: PowerShell@2
         displayName: 'Generate Summary'
         condition: always()
         inputs:
           targetType: 'inline'
           script: |
+            $deploymentTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            
             $summary = @"
             # Apigee Proxy Deployment Summary
             
-            ## Deployment Status
-            | Step | Status |
-            |--------------------------|---------------------|
-            | Proxy Name | ${{ parameters.proxyName }} |
-            | New Version | $(LATEST_REVISION) |
-            | Dev Deployment | $(if ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
-            | Test Deployment | $(if ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
-            | UAT Deployment | $(if ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
+            ## Deployment Information
+            - **Deployment Time**: $deploymentTime
+            - **Proxy Name**: ${{ parameters.proxyName }}
+            - **New Revision**: $(LATEST_REVISION)
+            - **Pipeline Status**: $(if ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Successful' } else { '⛔ Failed' })
             
-            ## Cleanup Summary
-            | Metric | Count |
-            |---------|---------|
-            | Revisions Kept | $(KEPT_COUNT) |
-            | Revisions Deleted | $(DELETED_COUNT) |
-            | Cleanup Status | $(if ($(DELETED_COUNT) -gt 0) { if ($(FAILED_COUNT) -eq 0) { "✅ Successfully deleted $(DELETED_COUNT) revision(s)" } else { "⚠️ Deleted $(DELETED_COUNT) revision(s) with $(FAILED_COUNT) failure(s)" } } else { "ℹ️ No cleanup needed" }) |
+            ## Environment Deployments
+            | Environment | Status | Enabled |
+            |------------|---------|---------|
+            | Dev | $(if (-not ${{ parameters.deployToDev }}) { '⏭️ Skipped' } elseif ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) | ${{ parameters.deployToDev }} |
+            | Test | $(if (-not ${{ parameters.deployToTest }}) { '⏭️ Skipped' } elseif ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) | ${{ parameters.deployToTest }} |
+            | UAT | $(if (-not ${{ parameters.deployToUat }}) { '⏭️ Skipped' } elseif ($env:AGENT_JOBSTATUS -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) | ${{ parameters.deployToUat }} |
+            
+            ## Additional Information
+            - **Build Number**: $(Build.BuildNumber)
+            - **Trigger**: $(Build.Reason)
+            - **Repository**: $(Build.Repository.Name)
             "@
             
             $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
 
+      # Publish Summary
       - task: PublishBuildArtifacts@1
         condition: always()
         inputs:
