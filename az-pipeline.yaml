@@ -53,73 +53,75 @@ jobs:
         inputs:
           targetType: 'inline'
           script: |
-            Write-Host "Installing Google Cloud SDK version $(GCLOUD_VERSION)"
-            
-            # Download specific version
-            $installerUrl = "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-$(GCLOUD_VERSION)-windows-x86_64-bundled-python.zip"
-            $installerPath = "$env:TEMP\google-cloud-sdk.zip"
-            
-            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-            Expand-Archive -Path $installerPath -DestinationPath "$env:ProgramFiles"
-            
-            # Add to PATH
-            $env:PATH = "$env:ProgramFiles\google-cloud-sdk\bin;$env:PATH"
-            
-            # Verify installation
-            $gcloudVersion = gcloud version
-            Write-Host "Installed Google Cloud SDK version:"
-            Write-Host $gcloudVersion
-            
-            # Configure SDK settings
-            gcloud config set disable_usage_reporting true
-            gcloud config set component_manager/disable_update_check true
+            # Check if gcloud is already installed
+            $gcloudPath = "${env:ProgramFiles(x86)}\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+            if (Test-Path $gcloudPath) {
+                Write-Host "Google Cloud SDK is already installed"
+                $env:PATH = "${env:ProgramFiles(x86)}\Google\Cloud SDK\google-cloud-sdk\bin;$env:PATH"
+            } else {
+                Write-Host "Installing minimal Google Cloud SDK..."
+                
+                # Download the Cloud SDK installer
+                $installerUrl = "https://dl.google.com/dl/cloudsdk/channels/rapid/google-cloud-cli-446.0.0-windows-x86_64.zip"
+                $installerPath = "$env:TEMP\google-cloud-sdk.zip"
+                
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $webClient = New-Object System.Net.WebClient
+                $webClient.Headers.Add("User-Agent", "PowerShell Script")
+                $webClient.DownloadFile($installerUrl, $installerPath)
+                
+                # Extract SDK
+                $sdkPath = "${env:ProgramFiles(x86)}\Google\Cloud SDK"
+                New-Item -ItemType Directory -Force -Path $sdkPath | Out-Null
+                
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($installerPath, $sdkPath)
+                
+                # Add to PATH
+                $env:PATH = "$sdkPath\google-cloud-sdk\bin;$env:PATH"
+                
+                # Minimal init
+                Write-Host "Initializing SDK..."
+                gcloud config set disable_usage_reporting true
+                gcloud config set disable_anonymous_usage_stats true
+                
+                # Clean up
+                Remove-Item $installerPath -Force
+            }
 
       - task: PowerShell@2
         name: authToGCP
-        displayName: 'Authenticate to GCP'
+        displayName: 'Authenticate to GCP using WIF'
         inputs:
           targetType: 'inline'
           script: |
             try {
-                # Check if credentials exist
-                if ([string]::IsNullOrEmpty($env:GOOGLE_CREDENTIALS)) {
-                    Write-Error "GOOGLE_CREDENTIALS environment variable is not set"
-                    exit 1
-                }
-
-                # Create credentials file
-                $credentialsPath = Join-Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY "gcp-credentials.json"
-                $env:GOOGLE_CREDENTIALS | Out-File -FilePath $credentialsPath -Encoding UTF8
+                Write-Host "Authenticating using Workload Identity Federation..."
                 
-                Write-Host "Authenticating to GCP..."
+                # Generate authentication token
+                $AZURE_TOKEN = "$(System.AccessToken)"
                 
-                # Verify the credentials file exists and has content
-                if (-not (Test-Path $credentialsPath) -or (Get-Item $credentialsPath).Length -eq 0) {
-                    Write-Error "Credentials file was not created properly"
-                    exit 1
-                }
-                
-                # Authenticate using the service account
-                gcloud auth activate-service-account --key-file=$credentialsPath
-                
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Error "Failed to authenticate with GCP"
-                    exit 1
-                }
+                # Configure workload identity federation using predefined variables
+                gcloud auth login --brief --cred-file=<(echo '{
+                    "type": "external_account",
+                    "audience": "//iam.googleapis.com/$(WORKLOAD_IDENTITY_POOL_ID)",
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                    "token_url": "https://sts.googleapis.com/v1/token",
+                    "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(SERVICE_ACCOUNT):generateAccessToken",
+                    "credential_source": {
+                        "file": "$(System.DefaultWorkingDirectory)/azure-token.txt"
+                    }
+                }')
                 
                 # Get and store access token
                 $ACCESS_TOKEN = gcloud auth print-access-token
                 Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
                 
-                # Verify authentication
-                Write-Host "Verifying authentication..."
-                gcloud auth list
-                
-                # Clean up credentials file
-                Remove-Item $credentialsPath -Force
+                Write-Host "Successfully authenticated with GCP"
             }
             catch {
                 Write-Error "Authentication failed: $_"
+                Write-Host "Error details: $($_.Exception.Message)"
                 exit 1
             }
 
