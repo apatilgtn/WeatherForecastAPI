@@ -98,31 +98,57 @@ jobs:
             try {
                 Write-Host "Authenticating using Workload Identity Federation..."
                 
-                # Generate authentication token
-                $AZURE_TOKEN = "$(System.AccessToken)"
-                
-                # Configure workload identity federation using predefined variables
-                gcloud auth login --brief --cred-file=<(echo '{
-                    "type": "external_account",
-                    "audience": "//iam.googleapis.com/$(WORKLOAD_IDENTITY_POOL_ID)",
-                    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-                    "token_url": "https://sts.googleapis.com/v1/token",
-                    "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(SERVICE_ACCOUNT):generateAccessToken",
-                    "credential_source": {
-                        "file": "$(System.DefaultWorkingDirectory)/azure-token.txt"
+                # Create configuration file
+                $config = @{
+                    type = "external_account"
+                    audience = "//iam.googleapis.com/$(WORKLOAD_IDENTITY_POOL_ID)"
+                    subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
+                    token_url = "https://sts.googleapis.com/v1/token"
+                    service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(SERVICE_ACCOUNT):generateAccessToken"
+                    credential_source = @{
+                        url = "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)"
+                        headers = @{
+                            "Authorization" = "Bearer $(System.AccessToken)"
+                        }
+                        format = @{
+                            type = "json"
+                            subject_token_field_name = "access_token"
+                        }
                     }
-                }')
+                }
+                
+                # Save config to file
+                $configPath = "wif-config.json"
+                $config | ConvertTo-Json -Depth 10 | Set-Content -Path $configPath
+                
+                Write-Host "Generated WIF configuration file"
+                
+                # Authenticate using the configuration file
+                gcloud auth login --cred-file="$configPath" --brief
+                
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to authenticate with gcloud"
+                }
                 
                 # Get and store access token
                 $ACCESS_TOKEN = gcloud auth print-access-token
-                Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to get access token"
+                }
                 
+                Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
                 Write-Host "Successfully authenticated with GCP"
             }
             catch {
                 Write-Error "Authentication failed: $_"
                 Write-Host "Error details: $($_.Exception.Message)"
                 exit 1
+            }
+            finally {
+                # Cleanup
+                if (Test-Path $configPath) {
+                    Remove-Item $configPath -Force
+                }
             }
 
       - task: NodeTool@0
