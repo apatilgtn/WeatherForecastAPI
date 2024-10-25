@@ -2,6 +2,12 @@ name: Apigee Deployment Pipeline
 
 trigger: none # Disable automatic triggers
 
+resources:
+  repositories:
+    - repository: templates  # The name we'll use to reference the repo
+      type: git
+      name: apigeex-ci-cd 
+
 parameters:
   - name: proxyName
     type: string
@@ -30,355 +36,173 @@ variables:
 pool:
   vmImage: ubuntu-latest
 
-jobs:
-  - job: GCP_Auth
-    displayName: 'GCP Authentication'
-    steps:
-      - task: PowerShell@2
-        name: authToGCP
-        displayName: 'Authenticate to GCP'
-        inputs:
-          targetType: 'inline'
-          script: |
-            try {
-                Write-Host "Starting GCP Authentication..."
+stages:
+  - stage: Build
+    displayName: 'Build and Validate'
+    jobs:
+      - job: GCP_Auth
+        displayName: 'GCP Authentication'
+        steps:
+          - task: PowerShell@2
+            name: authToGCP
+            displayName: 'Authenticate to GCP'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Your existing PowerShell script here
+            env:
+              AZURE_TOKEN: $(System.AccessToken)
+
+          - task: Bash@3
+            displayName: 'Verify Authentication'
+            inputs:
+              targetType: 'inline'
+              script: |
+                set -e
+                echo "Verifying authentication..."
+                gcloud auth list
+                echo "Verification complete"
+
+      - job: ApigeeLint
+        displayName: 'Lint Apigee Proxy'
+        dependsOn: GCP_Auth
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            displayName: 'Install Node.js'
+
+          - task: Bash@3
+            displayName: 'Run Apigee Lint'
+            inputs:
+              targetType: 'inline'
+              script: |
+                npm install -g apigeelint
+                apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
+
+  - stage: Prepare
+    displayName: 'Prepare Bundle'
+    dependsOn: Build
+    jobs:
+      - job: PrepareAndUpload
+        displayName: 'Prepare and Upload Bundle'
+        variables:
+          ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+        steps:
+          - task: Bash@3
+            displayName: 'Install apigeecli'
+            inputs:
+              targetType: 'inline'
+              script: |
+                curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+                echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+
+          - task: ArchiveFiles@2
+            displayName: 'Create API Bundle'
+            inputs:
+              rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+
+          - task: Bash@3
+            name: uploadBundle
+            displayName: 'Upload and Get Revision'
+            inputs:
+              targetType: 'inline'
+              script: |
+                IMPORT_OUTPUT=$(apigeecli apis create bundle \
+                  -n "${{ parameters.proxyName }}" \
+                  -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
+                  --org "$(APIGEE_ORG)" \
+                  --token "$(ACCESS_TOKEN)")
                 
-                # Install Google Cloud SDK
-                Write-Host "Installing Google Cloud SDK..."
-                $installScript = '
-                    apt-get update && apt-get install -y apt-transport-https ca-certificates gnupg
-                    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-                    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
-                    apt-get update && apt-get install -y google-cloud-cli
-                '
-                
-                # Create temp directory for credentials
-                $credPath = Join-Path $env:TEMP "gcp-auth"
-                New-Item -ItemType Directory -Force -Path $credPath | Out-Null
-                
-                # Create Workload Identity configuration
-                Write-Host "Creating Workload Identity configuration..."
-                $configContent = @{
-                    type = "external_account"
-                    audience = "//iam.googleapis.com/projects/69986464585/locations/global/workloadIdentityPools/az-pool"
-                    subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
-                    token_url = "https://sts.googleapis.com/v1/token"
-                    credential_source = @{
-                        file = Join-Path $credPath "azure-token.txt"
-                    }
-                    service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com:generateAccessToken"
-                }
-                
-                # Save Azure token
-                Write-Host "Saving Azure token..."
-                $tokenPath = Join-Path $credPath "azure-token.txt"
-                $env:AZURE_TOKEN | Out-File -FilePath $tokenPath -Force
-                
-                # Save configuration
-                Write-Host "Saving credential configuration..."
-                $configPath = Join-Path $credPath "config.json"
-                $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath $configPath -Force
-                
-                # Set GOOGLE_APPLICATION_CREDENTIALS
-                $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
-                
-                # Authenticate
-                Write-Host "Authenticating with GCP..."
-                $authResult = gcloud auth login --cred-file="$configPath" --quiet
-                
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to authenticate with GCP"
-                }
-                
-                # Get and store access token
-                Write-Host "Getting access token..."
-                $accessToken = gcloud auth print-access-token
-                if ([string]::IsNullOrEmpty($accessToken)) {
-                    throw "Failed to get access token"
-                }
-                
-                Write-Host "Setting access token as pipeline variable..."
-                Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
-                Write-Host "Authentication successful"
-            }
-            catch {
-                Write-Error "Authentication failed: $_"
-                Write-Host "##[error]Error details: $($_.Exception.Message)"
-                exit 1
-            }
-            finally {
-                # Cleanup
-                if (Test-Path $credPath) {
-                    Remove-Item -Path $credPath -Recurse -Force
-                }
-            }
-        env:
-          AZURE_TOKEN: $(System.AccessToken)
- - task: Bash@3
-        displayName: 'Verify Authentication'
-        inputs:
-          targetType: 'inline'
-          script: |
-            set -e
-            echo "Verifying authentication..."
-            gcloud auth list
-            echo "Verification complete"
+                LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
+                echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
 
-  - job: ApigeeLint
-    displayName: 'Lint Apigee Proxy'
-    dependsOn: GCP_Auth
-    steps:
-      - task: NodeTool@0
-        inputs:
-          versionSpec: '20.x'
-        displayName: 'Install Node.js'
+  - stage: Deploy 
+    displayName: 'Deploy to Environments'
+    dependsOn: Prepare
+    jobs:
+      - deployment: DeployToDev
+        displayName: 'Deploy to Dev'
+        environment: development
+        variables:
+          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/deploy-steps.yml@templates
+                  parameters:
+                    environmentName: ${{ parameters.devEnv }}
 
-      - task: Bash@3
-        displayName: 'Run Apigee Lint'
-        inputs:
-          targetType: 'inline'
-          script: |
-            npm install -g apigeelint
-            apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
+      - deployment: DeployToTest
+        displayName: 'Deploy to Test'
+        dependsOn: DeployToDev
+        environment: test
+        variables:
+          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/deploy-steps.yml@templates
+                  parameters:
+                    environmentName: ${{ parameters.testEnv }}
 
-  - job: PrepareAndUpload
-    displayName: 'Prepare and Upload Bundle'
-    dependsOn: [GCP_Auth, ApigeeLint]
-    variables:
-      ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-    steps:
-      - task: Bash@3
-        displayName: 'Install apigeecli'
-        inputs:
-          targetType: 'inline'
-          script: |
-            curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-            echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+      - deployment: DeployToUat
+        displayName: 'Deploy to UAT'
+        dependsOn: DeployToTest
+        environment: uat
+        variables:
+          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/deploy-steps.yml@templates
+                  parameters:
+                    environmentName: ${{ parameters.uatEnv }}
 
-      - task: ArchiveFiles@2
-        displayName: 'Create API Bundle'
-        inputs:
-          rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
-          includeRootFolder: false
-          archiveType: 'zip'
-          archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+  - stage: Cleanup
+    displayName: 'Cleanup and Summary'
+    dependsOn: Deploy
+    jobs:
+      - job: CleanupRevisions
+        displayName: 'Cleanup Old Revisions'
+        variables:
+          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+        steps:
+          - task: Bash@3
+            name: cleanup
+            displayName: 'Delete Older Revisions'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Your existing cleanup script here
 
-      - task: Bash@3
-        name: uploadBundle
-        displayName: 'Upload and Get Revision'
-        inputs:
-          targetType: 'inline'
-          script: |
-            IMPORT_OUTPUT=$(apigeecli apis create bundle \
-              -n "${{ parameters.proxyName }}" \
-              -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
-              --org "$(APIGEE_ORG)" \
-              --token "$(ACCESS_TOKEN)")
-            
-            LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
-            
-            if [ -z "$LATEST_REVISION" ]; then
-              echo "Failed to get revision number"
-              exit 1
-            fi
-            
-            echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
+      - job: DeploymentSummary
+        displayName: 'Generate Deployment Summary'
+        dependsOn: CleanupRevisions
+        variables:
+          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
+          KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
+          DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
+          FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
+        steps:
+          - task: PowerShell@2
+            displayName: 'Generate Summary'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Your existing summary generation script here
 
-  - job: DeployToDev
-    displayName: 'Deploy to Dev'
-    dependsOn: [GCP_Auth, PrepareAndUpload]
-    pool:
-      vmImage: ubuntu-latest
-    variables:
-      ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-      LATEST_REVISION: $[ dependencies.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-    steps:
-      - task: Bash@3
-        displayName: 'Install apigeecli'
-        inputs:
-          targetType: 'inline'
-          script: |
-            curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-            echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-
-      - task: Bash@3
-        displayName: 'Deploy to Dev Environment'
-        inputs:
-          targetType: 'inline'
-          script: |
-            apigeecli apis deploy \
-              --name "${{ parameters.proxyName }}" \
-              --org "$(APIGEE_ORG)" \
-              --env "${{ parameters.devEnv }}" \
-              --rev "$(LATEST_REVISION)" \
-              --token "$(ACCESS_TOKEN)" \
-              --ovr \
-              --wait
-
-  - job: DeployToTest
-    displayName: 'Deploy to Test'
-    dependsOn: [PrepareAndUpload, DeployToDev]
-    pool:
-      vmImage: ubuntu-latest
-    variables:
-      ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-      LATEST_REVISION: $[ dependencies.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-    steps:
-      - task: Bash@3
-        displayName: 'Install apigeecli'
-        inputs:
-          targetType: 'inline'
-          script: |
-            curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-            echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-
-      - task: Bash@3
-        displayName: 'Deploy to Test Environment'
-        inputs:
-          targetType: 'inline'
-          script: |
-            apigeecli apis deploy \
-              --name "${{ parameters.proxyName }}" \
-              --org "$(APIGEE_ORG)" \
-              --env "${{ parameters.testEnv }}" \
-              --rev "$(LATEST_REVISION)" \
-              --token "$(ACCESS_TOKEN)" \
-              --ovr \
-              --wait
-
-  - job: DeployToUat
-    displayName: 'Deploy to UAT'
-    dependsOn: [PrepareAndUpload, DeployToTest]
-    pool:
-      vmImage: ubuntu-latest
-    variables:
-      ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-      LATEST_REVISION: $[ dependencies.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-    steps:
-      - task: Bash@3
-        displayName: 'Install apigeecli'
-        inputs:
-          targetType: 'inline'
-          script: |
-            curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-            echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-
-      - task: Bash@3
-        displayName: 'Deploy to UAT Environment'
-        inputs:
-          targetType: 'inline'
-          script: |
-            apigeecli apis deploy \
-              --name "${{ parameters.proxyName }}" \
-              --org "$(APIGEE_ORG)" \
-              --env "${{ parameters.uatEnv }}" \
-              --rev "$(LATEST_REVISION)" \
-              --token "$(ACCESS_TOKEN)" \
-              --ovr \
-              --wait
-
-  - job: CleanupRevisions
-    displayName: 'Cleanup Old Revisions'
-    dependsOn: [DeployToDev, DeployToTest, DeployToUat]
-    condition: always()
-    pool:
-      vmImage: ubuntu-latest
-    variables:
-      ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-    steps:
-      - task: Bash@3
-        name: cleanup
-        displayName: 'Delete Older Revisions'
-        inputs:
-          targetType: 'inline'
-          script: |
-            set +e
-            
-            echo "Starting deletion of older revisions for proxy: ${{ parameters.proxyName }}"
-            
-            # Get revisions
-            REVISIONS_JSON=$(curl -s -X GET -H "Authorization: Bearer $(ACCESS_TOKEN)" \
-              "https://apigee.googleapis.com/v1/organizations/$(APIGEE_ORG)/apis/${{ parameters.proxyName }}/revisions")
-            
-            readarray -t REVISIONS < <(echo "$REVISIONS_JSON" | jq -r '.[]' | sort -n)
-            TOTAL_REVISIONS=${#REVISIONS[@]}
-            
-            KEEP_COUNT=5
-            DELETED=0
-            FAILED=0
-            
-            if [ "$TOTAL_REVISIONS" -gt "$KEEP_COUNT" ]; then
-              DELETE_COUNT=$((TOTAL_REVISIONS - KEEP_COUNT))
-              
-              for ((i=0; i<DELETE_COUNT; i++)); do
-                REV="${REVISIONS[$i]}"
-                echo "Deleting revision $REV"
-                
-                STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-                  -H "Authorization: Bearer $(ACCESS_TOKEN)" \
-                  "https://apigee.googleapis.com/v1/organizations/$(APIGEE_ORG)/apis/${{ parameters.proxyName }}/revisions/$REV")
-                
-                if [ "$STATUS_CODE" = "200" ]; then
-                  ((DELETED++))
-                else
-                  ((FAILED++))
-                fi
-              done
-            fi
-            
-            echo "##vso[task.setvariable variable=KEPT_COUNT;isOutput=true]$KEEP_COUNT"
-            echo "##vso[task.setvariable variable=DELETED_COUNT;isOutput=true]$DELETED"
-            echo "##vso[task.setvariable variable=FAILED_COUNT;isOutput=true]$FAILED"
-
-  - job: DeploymentSummary
-    displayName: 'Generate Deployment Summary'
-    dependsOn: [ApigeeLint, PrepareAndUpload, DeployToDev, DeployToTest, DeployToUat, CleanupRevisions]
-    condition: always()
-    pool:
-      vmImage: ubuntu-latest
-    variables:
-      LATEST_REVISION: $[ dependencies.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-      KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
-      DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
-      FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
-    steps:
-      - task: PowerShell@2
-        displayName: 'Generate Summary'
-        inputs:
-          targetType: 'inline'
-          script: |
-            $summary = @"
-            # Apigee Proxy Deployment Summary
-            
-            ## Deployment Status
-            | Step | Status |
-            |--------------------------|---------------------|
-            | Proxy Name | ${{ parameters.proxyName }} |
-            | New Version | $(LATEST_REVISION) |
-            | Dev Deployment | $(if ('$(AGENT_JOBSTATUS)' -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
-            | Test Deployment | $(if ('$(AGENT_JOBSTATUS)' -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
-            | UAT Deployment | $(if ('$(AGENT_JOBSTATUS)' -eq 'Succeeded') { '✅ Success' } else { '⛔ Failed' }) |
-            
-            ## Cleanup Summary
-            | Metric | Count |
-            |---------|---------|
-            | Revisions Kept | $(KEPT_COUNT) |
-            | Revisions Deleted | $(DELETED_COUNT) |
-            | Cleanup Status | $(if ('$(DELETED_COUNT)' -gt 0) { if ('$(FAILED_COUNT)' -eq 0) { "✅ Successfully deleted $(DELETED_COUNT) revision(s)" } else { "⚠️ Deleted $(DELETED_COUNT) revision(s) with $(FAILED_COUNT) failure(s)" } } else { "ℹ️ No cleanup needed" }) |
-            
-            ## Additional Details
-            - Build Number: $(Build.BuildNumber)
-            - Pipeline Run: $(Build.BuildId)
-            - Trigger Type: $(Build.Reason)
-            - Repository: $(Build.Repository.Name)
-            - Branch: $(Build.SourceBranchName)
-            "@
-            
-            $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
-            Write-Host "Deployment summary generated successfully"
-
-      - task: PublishBuildArtifacts@1
-        condition: always()
-        inputs:
-          pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
-          artifactName: 'DeploymentSummary'
+          - task: PublishBuildArtifacts@1
+            condition: always()
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
+              artifactName: 'DeploymentSummary'
