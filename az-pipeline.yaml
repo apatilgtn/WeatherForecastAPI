@@ -23,9 +23,10 @@ parameters:
     default: 'uat'
 
 variables:
-  - group: apigeeX # Variable group containing: WORKLOAD_IDENTITY_PROVIDER, SERVICE_ACCOUNT, APIGEE_ORG
+  - group: apigeeX
 
-- job: GCP_Auth
+jobs:
+  - job: GCP_Auth
     displayName: 'GCP Authentication'
     pool:
       vmImage: ubuntu-latest
