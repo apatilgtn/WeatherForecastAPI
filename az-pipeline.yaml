@@ -98,6 +98,11 @@ jobs:
             try {
                 Write-Host "Authenticating using Workload Identity Federation..."
                 
+                # Get Azure DevOps token and create token file
+                $token = "$(System.AccessToken)"
+                $tokenPath = "azure-token.txt"
+                $token | Set-Content -Path $tokenPath
+                
                 # Create configuration file
                 $config = @{
                     type = "external_account"
@@ -106,13 +111,9 @@ jobs:
                     token_url = "https://sts.googleapis.com/v1/token"
                     service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(SERVICE_ACCOUNT):generateAccessToken"
                     credential_source = @{
-                        url = "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)"
-                        headers = @{
-                            "Authorization" = "Bearer $(System.AccessToken)"
-                        }
+                        file = $tokenPath
                         format = @{
-                            type = "json"
-                            subject_token_field_name = "access_token"
+                            type = "text"
                         }
                     }
                 }
@@ -122,6 +123,12 @@ jobs:
                 $config | ConvertTo-Json -Depth 10 | Set-Content -Path $configPath
                 
                 Write-Host "Generated WIF configuration file"
+                
+                # Print config for debugging (remove sensitive data)
+                $debugConfig = $config.Clone()
+                $debugConfig.credential_source.file = "[REDACTED]"
+                Write-Host "Config (sanitized):"
+                Write-Host ($debugConfig | ConvertTo-Json -Depth 10)
                 
                 # Authenticate using the configuration file
                 gcloud auth login --cred-file="$configPath" --brief
@@ -138,6 +145,10 @@ jobs:
                 
                 Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN]$ACCESS_TOKEN"
                 Write-Host "Successfully authenticated with GCP"
+                
+                # Verify authentication
+                Write-Host "Verifying authentication..."
+                gcloud auth list
             }
             catch {
                 Write-Error "Authentication failed: $_"
@@ -148,6 +159,9 @@ jobs:
                 # Cleanup
                 if (Test-Path $configPath) {
                     Remove-Item $configPath -Force
+                }
+                if (Test-Path $tokenPath) {
+                    Remove-Item $tokenPath -Force
                 }
             }
 
