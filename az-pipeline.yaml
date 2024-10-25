@@ -114,8 +114,7 @@ jobs:
             }
         env:
           AZURE_TOKEN: $(System.AccessToken)
-
-      - task: Bash@3
+ - task: Bash@3
         displayName: 'Verify Authentication'
         inputs:
           targetType: 'inline'
