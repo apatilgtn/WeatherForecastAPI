@@ -4,7 +4,7 @@ trigger: none # Disable automatic triggers
 
 resources:
   repositories:
-    - repository: templates  # The name we'll use to reference the repo
+    - repository: templates  
       type: git
       name: apigeex-ci-cd 
 
@@ -45,13 +45,87 @@ stages:
         steps:
           - task: PowerShell@2
             name: authToGCP
-            displayName: 'Authenticate to GCP'
+            displayName: 'Authenticate to GCP using WIF'
             inputs:
               targetType: 'inline'
               script: |
-                # Your existing PowerShell script here
+                try {
+                    Write-Host "Starting GCP Authentication..."
+                    
+                    # Install Google Cloud SDK
+                    Write-Host "Installing Google Cloud SDK..."
+                    $installScript = "
+                    apt-get update && apt-get install -y apt-transport-https ca-certificates gnupg
+                    echo 'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+                    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+                    apt-get update && apt-get install -y google-cloud-cli
+                    "
+                    bash -c $installScript
+                    
+                    # Create temp directory for credentials
+                    $credPath = Join-Path $env:TEMP "gcp-auth"
+                    New-Item -ItemType Directory -Force -Path $credPath | Out-Null
+                    
+                    # Create Workload Identity configuration
+                    Write-Host "Creating Workload Identity configuration..."
+                    $configContent = @{
+                        type = "external_account"
+                        audience = "//iam.googleapis.com/$(WIF_POOL)"
+                        subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
+                        token_url = "https://sts.googleapis.com/v1/token"
+                        credential_source = @{
+                            file = Join-Path $credPath "azure-token.txt"
+                        }
+                        service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(SERVICE_ACCOUNT):generateAccessToken"
+                    }
+                    
+                    # Save Azure token
+                    Write-Host "Saving Azure token..."
+                    $tokenPath = Join-Path $credPath "azure-token.txt"
+                    $env:AZURE_TOKEN | Out-File -FilePath $tokenPath -Force
+                    
+                    # Save configuration
+                    Write-Host "Saving credential configuration..."
+                    $configPath = Join-Path $credPath "config.json"
+                    $configContent | ConvertTo-Json -Depth 10 | Out-File -FilePath $configPath -Force
+                    
+                    # Set GOOGLE_APPLICATION_CREDENTIALS
+                    $env:GOOGLE_APPLICATION_CREDENTIALS = $configPath
+                    
+                    # Authenticate
+                    Write-Host "Authenticating with GCP..."
+                    $authResult = gcloud auth login --cred-file="$configPath" --quiet
+                    
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to authenticate with GCP"
+                    }
+                    
+                    # Get and store access token
+                    Write-Host "Getting access token..."
+                    $accessToken = gcloud auth print-access-token
+                    if ([string]::IsNullOrEmpty($accessToken)) {
+                        throw "Failed to get access token"
+                    }
+                    
+                    Write-Host "Setting access token as pipeline variable..."
+                    Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
+                    Write-Host "Authentication successful"
+                }
+                catch {
+                    Write-Error "Authentication failed: $_"
+                    Write-Host "##[error]Error details: $($_.Exception.Message)"
+                    exit 1
+                }
+                finally {
+                    # Cleanup
+                    if (Test-Path $credPath) {
+                        Remove-Item -Path $credPath -Recurse -Force
+                    }
+                }
             env:
               AZURE_TOKEN: $(System.AccessToken)
+              WIF_POOL: $(WIF_POOL)
+              SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)
 
           - task: Bash@3
             displayName: 'Verify Authentication'
