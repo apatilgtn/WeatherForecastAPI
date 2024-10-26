@@ -126,7 +126,7 @@ stages:
                 
   - stage: Deploy 
     displayName: 'Deploy to Environment'
-    dependsOn: Build  # Only depends on Build
+    dependsOn: Build
     variables:
       ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
     jobs:
@@ -148,14 +148,56 @@ stages:
                       curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
                       echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
 
+                - task: Bash@3
+                  displayName: 'Verify Source Directory'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Current directory: $(pwd)"
+                      echo "Build.SourcesDirectory: $(Build.SourcesDirectory)"
+                      echo "Directory contents:"
+                      ls -la $(Build.SourcesDirectory)
+                      
+                      # Check if proxy directory exists
+                      if [ ! -d "$(Build.SourcesDirectory)/apiproxy" ]; then
+                        echo "Error: apiproxy directory not found"
+                        exit 1
+                      fi
+                      
+                      echo "Proxy directory contents:"
+                      ls -la $(Build.SourcesDirectory)/apiproxy
+
+                - task: CopyFiles@2
+                  displayName: 'Copy API Proxy Files'
+                  inputs:
+                    sourceFolder: '$(Build.SourcesDirectory)/apiproxy'
+                    contents: '**'
+                    targetFolder: '$(Build.ArtifactStagingDirectory)/apiproxy'
+                    cleanTargetFolder: true
+                    overWrite: true
+
                 - task: ArchiveFiles@2
                   displayName: 'Create API Bundle'
                   inputs:
-                    rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
+                    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/apiproxy'
                     includeRootFolder: true
                     archiveType: 'zip'
                     archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
                     replaceExistingArchive: true
+
+                - task: Bash@3
+                  displayName: 'Verify Bundle'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Checking zip file..."
+                      if [ ! -f "$(Build.ArtifactStagingDirectory)/proxy.zip" ]; then
+                        echo "Error: Zip file not created"
+                        exit 1
+                      fi
+                      
+                      echo "Zip contents:"
+                      unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
 
                 - task: Bash@3
                   name: uploadAndDeploy
@@ -182,6 +224,7 @@ stages:
                         --org "$(APIGEE_ORG)" \
                         --token "$(ACCESS_TOKEN)" \
                         --ovr
+                        
   - stage: PostDeploy
     displayName: 'Cleanup and Summary'
     dependsOn: Deploy
