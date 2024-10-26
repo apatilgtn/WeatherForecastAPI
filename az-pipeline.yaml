@@ -21,14 +21,6 @@ parameters:
     type: string
     displayName: 'Development Environment'
     default: 'test-env'
-  - name: testEnv
-    type: string
-    displayName: 'Test Environment'
-    default: 'test'
-  - name: uatEnv
-    type: string
-    displayName: 'UAT Environment'
-    default: 'uat'
 
 variables:
   - group: apigeeX
@@ -131,122 +123,94 @@ stages:
               script: |
                 npm install -g apigeelint
                 apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
-
-  - stage: Prepare
-    displayName: 'Prepare Bundle'
-    dependsOn: Build
-    jobs:
-      - job: PrepareAndUpload
-        displayName: 'Prepare and Upload Bundle'
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-        steps:
-          - task: Bash@3
-            displayName: 'Install apigeecli'
-            inputs:
-              targetType: 'inline'
-              script: |
-                curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-                echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-
-          - task: ArchiveFiles@2
-            displayName: 'Create API Bundle'
-            inputs:
-              rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
-              includeRootFolder: true
-              archiveType: 'zip'
-              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
-              replaceExistingArchive: true
-
-          - task: Bash@3
-            displayName: 'Verify Bundle Structure'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "Verifying bundle structure..."
-                unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
                 
-                # Check if required files exist
-                unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/proxies/default.xml" > /dev/null || {
-                  echo "Error: Missing or invalid proxies/default.xml"
-                  exit 1
-                }
-                
-                unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/targets/default.xml" > /dev/null || {
-                  echo "Error: Missing or invalid targets/default.xml"
-                  exit 1
-                }
-
-          - task: Bash@3
-            name: uploadBundle
-            displayName: 'Upload and Get Revision'
-            inputs:
-              targetType: 'inline'
-              script: |
-                IMPORT_OUTPUT=$(apigeecli apis create bundle \
-                  -n "${{ parameters.proxyName }}" \
-                  -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
-                  --org "$(APIGEE_ORG)" \
-                  --token "$(ACCESS_TOKEN)")
-                
-                LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
-                echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
-
   - stage: Deploy 
-    displayName: 'Deploy to Environments'
-    dependsOn: 
-      - Build
-      - Prepare
+    displayName: 'Deploy to Environment'
+    dependsOn: Build  # Only depends on Build stage
     variables:
       ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-      LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
     jobs:
       - deployment: DeployToDev
         displayName: 'Deploy to Dev'
         environment: development
         variables:
           ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
           PROXY_NAME: ${{ parameters.proxyName }}
         strategy:
           runOnce:
             deploy:
               steps:
-                - template: templates/deploy-steps.yml@templates
-                  parameters:
-                    environmentName: ${{ parameters.devEnv }}
+                - task: Bash@3
+                  displayName: 'Install apigeecli'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+                      echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
 
-      - deployment: DeployToTest
-        displayName: 'Deploy to Test'
-        dependsOn: DeployToDev
-        environment: test
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-          PROXY_NAME: ${{ parameters.proxyName }}
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - template: templates/deploy-steps.yml@templates
-                  parameters:
-                    environmentName: ${{ parameters.testEnv }}
+                - task: ArchiveFiles@2
+                  displayName: 'Create API Bundle'
+                  inputs:
+                    rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
+                    includeRootFolder: true
+                    archiveType: 'zip'
+                    archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+                    replaceExistingArchive: true
 
-      - deployment: DeployToUat
-        displayName: 'Deploy to UAT'
-        dependsOn: DeployToTest
-        environment: uat
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-          PROXY_NAME: ${{ parameters.proxyName }}
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - template: templates/deploy-steps.yml@templates
-                  parameters:
-                    environmentName: ${{ parameters.uatEnv }}
+                - task: Bash@3
+                  displayName: 'Verify Bundle Structure'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "Verifying bundle structure..."
+                      unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
+                      
+                      # Check if required files exist
+                      unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/proxies/default.xml" > /dev/null || {
+                        echo "Error: Missing or invalid proxies/default.xml"
+                        exit 1
+                      }
+                      
+                      unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/targets/default.xml" > /dev/null || {
+                        echo "Error: Missing or invalid targets/default.xml"
+                        exit 1
+                      }
+
+                - task: Bash@3
+                  name: uploadAndDeploy
+                  displayName: 'Upload and Deploy Bundle'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      # Upload bundle
+                      echo "Uploading bundle..."
+                      IMPORT_OUTPUT=$(apigeecli apis create bundle \
+                        -n "${{ parameters.proxyName }}" \
+                        -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
+                        --org "$(APIGEE_ORG)" \
+                        --token "$(ACCESS_TOKEN)")
+                      
+                      # Get revision number
+                      REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
+                      echo "New revision number: $REVISION"
+                      echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$REVISION"
+                      
+                      # Deploy to environment
+                      echo "Deploying revision $REVISION to ${{ parameters.devEnv }}..."
+                      apigeecli apis deploy \
+                        --name "${{ parameters.proxyName }}" \
+                        --env "${{ parameters.devEnv }}" \
+                        --rev "$REVISION" \
+                        --org "$(APIGEE_ORG)" \
+                        --token "$(ACCESS_TOKEN)" \
+                        --ovr
+                      
+                      if [ $? -eq 0 ]; then
+                        echo "Deployment successful!"
+                      else
+                        echo "Deployment failed!"
+                        exit 1
+                      fi
 
   - stage: Cleanup
     displayName: 'Cleanup and Summary'
@@ -256,6 +220,7 @@ stages:
         displayName: 'Cleanup Old Revisions'
         variables:
           ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+          PROXY_NAME: ${{ parameters.proxyName }}
         steps:
           - task: Bash@3
             name: cleanup
@@ -263,23 +228,117 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                # Your existing cleanup script here
+                echo "Starting cleanup of old revisions..."
+                
+                # Install apigeecli if not already installed
+                if ! command -v apigeecli &> /dev/null; then
+                  curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+                  echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+                fi
+                
+                # Get all revisions
+                REVISIONS=$(apigeecli apis list revisions \
+                  --name "$PROXY_NAME" \
+                  --org "$(APIGEE_ORG)" \
+                  --token "$(ACCESS_TOKEN)" \
+                  --disable-check)
+                
+                # Convert to array and sort
+                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -n))
+                TOTAL_REVISIONS=${#REVISION_ARRAY[@]}
+                
+                # Keep the latest 5 revisions
+                KEEP_COUNT=5
+                DELETE_COUNT=0
+                FAILED_COUNT=0
+                
+                if [ $TOTAL_REVISIONS -gt $KEEP_COUNT ]; then
+                  # Calculate how many to delete
+                  TO_DELETE=$((TOTAL_REVISIONS - KEEP_COUNT))
+                  
+                  for ((i=0; i<$TO_DELETE; i++)); do
+                    REV="${REVISION_ARRAY[$i]}"
+                    echo "Checking revision $REV..."
+                    
+                    # Check if revision is deployed
+                    DEPLOYMENT_STATUS=$(apigeecli apis list deployments \
+                      --name "$PROXY_NAME" \
+                      --org "$(APIGEE_ORG)" \
+                      --token "$(ACCESS_TOKEN)" \
+                      --rev "$REV" \
+                      --disable-check)
+                    
+                    if [[ $DEPLOYMENT_STATUS == *"not deployed"* ]]; then
+                      echo "Deleting revision $REV..."
+                      if apigeecli apis delete revision \
+                        --name "$PROXY_NAME" \
+                        --org "$(APIGEE_ORG)" \
+                        --token "$(ACCESS_TOKEN)" \
+                        --rev "$REV" \
+                        --disable-check; then
+                        ((DELETE_COUNT++))
+                        echo "Successfully deleted revision $REV"
+                      else
+                        ((FAILED_COUNT++))
+                        echo "Failed to delete revision $REV"
+                      fi
+                    else
+                      echo "Skipping deployed revision $REV"
+                    fi
+                  done
+                fi
+                
+                # Set output variables
+                echo "##vso[task.setvariable variable=KEPT_COUNT;isOutput=true]$KEEP_COUNT"
+                echo "##vso[task.setvariable variable=DELETED_COUNT;isOutput=true]$DELETE_COUNT"
+                echo "##vso[task.setvariable variable=FAILED_COUNT;isOutput=true]$FAILED_COUNT"
+                echo "##vso[task.setvariable variable=TOTAL_REVISIONS;isOutput=true]$TOTAL_REVISIONS"
 
       - job: DeploymentSummary
         displayName: 'Generate Deployment Summary'
         dependsOn: CleanupRevisions
         variables:
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
+          LATEST_REVISION: $[ dependencies.CleanupRevisions.outputs['uploadAndDeploy.LATEST_REVISION'] ]
           KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
           DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
           FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
+          TOTAL_REVISIONS: $[ dependencies.CleanupRevisions.outputs['cleanup.TOTAL_REVISIONS'] ]
         steps:
           - task: PowerShell@2
             displayName: 'Generate Summary'
             inputs:
               targetType: 'inline'
               script: |
-                # Your existing summary generation script here
+                $deploymentTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                
+                $summaryContent = @"
+                # Apigee Deployment Summary
+                
+                ## Deployment Details
+                - **API Proxy**: ${{ parameters.proxyName }}
+                - **Environment**: ${{ parameters.devEnv }}
+                - **Latest Revision**: $(LATEST_REVISION)
+                - **Deployment Time**: $deploymentTime
+                
+                ## Cleanup Results
+                - **Total Revisions**: $(TOTAL_REVISIONS)
+                - **Revisions Kept**: $(KEPT_COUNT)
+                - **Revisions Deleted**: $(DELETED_COUNT)
+                - **Failed Deletions**: $(FAILED_COUNT)
+                
+                ## Pipeline Information
+                - **Run ID**: $(Build.BuildId)
+                - **Pipeline**: $(Build.DefinitionName)
+                - **Triggered by**: $(Build.RequestedFor)
+                - **Branch**: $(Build.SourceBranch)
+                
+                ## Environment Status
+                - **Status**: Deployment Successful
+                - **Environment**: ${{ parameters.devEnv }}
+                - **Organization**: $(APIGEE_ORG)
+                "@
+                
+                $summaryContent | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md" -Encoding UTF8
 
           - task: PublishBuildArtifacts@1
             condition: always()
