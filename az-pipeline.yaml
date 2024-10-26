@@ -136,42 +136,61 @@ stages:
     displayName: 'Prepare Bundle'
     dependsOn: Build
     jobs:
-      - job: PrepareAndUpload
-        displayName: 'Prepare and Upload Bundle'
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-        steps:
-          - task: Bash@3
-            displayName: 'Install apigeecli'
-            inputs:
-              targetType: 'inline'
-              script: |
-                curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-                echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+    - job: PrepareAndUpload
+      displayName: 'Prepare and Upload Bundle'
+      variables:
+        ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+      steps:
+        - task: Bash@3
+          displayName: 'Install apigeecli'
+          inputs:
+            targetType: 'inline'
+            script: |
+              curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+              echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
 
-          - task: ArchiveFiles@2
-            displayName: 'Create API Bundle'
-            inputs:
-              rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
-              includeRootFolder: false
-              archiveType: 'zip'
-              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+        - task: ArchiveFiles@2
+          displayName: 'Create API Bundle'
+          inputs:
+            rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
+            includeRootFolder: true
+            archiveType: 'zip'
+            archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+            replaceExistingArchive: true
 
-          - task: Bash@3
-            name: uploadBundle
-            displayName: 'Upload and Get Revision'
-            inputs:
-              targetType: 'inline'
-              script: |
-                IMPORT_OUTPUT=$(apigeecli apis create bundle \
-                  -n "${{ parameters.proxyName }}" \
-                  -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
-                  --org "$(APIGEE_ORG)" \
-                  --token "$(ACCESS_TOKEN)")
-                
-                LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
-                echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
+        - task: Bash@3
+          displayName: 'Verify Bundle Structure'
+          inputs:
+            targetType: 'inline'
+            script: |
+              echo "Verifying bundle structure..."
+              unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
+              
+              # Check if required files exist
+              unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/proxies/default.xml" > /dev/null || {
+                echo "Error: Missing or invalid proxies/default.xml"
+                exit 1
+              }
+              
+              unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/targets/default.xml" > /dev/null || {
+                echo "Error: Missing or invalid targets/default.xml"
+                exit 1
+              }
 
+        - task: Bash@3
+          name: uploadBundle
+          displayName: 'Upload and Get Revision'
+          inputs:
+            targetType: 'inline'
+            script: |
+              IMPORT_OUTPUT=$(apigeecli apis create bundle \
+                -n "${{ parameters.proxyName }}" \
+                -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
+                --org "$(APIGEE_ORG)" \
+                --token "$(ACCESS_TOKEN)")
+              
+              LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
+              echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
   - stage: Deploy 
     displayName: 'Deploy to Environments'
     dependsOn: Prepare
