@@ -309,29 +309,77 @@ stages:
                 
                 $summaryContent = @"
                 # Apigee Deployment Summary
-                
+
+                ## Quick Overview
+                | Category | Value |
+                |----------|--------|
+                | Status | ✅ Deployment Successful |
+                | Timestamp | $deploymentTime |
+                | Environment | ${{ parameters.devEnv }} |
+                | Organization | $(APIGEE_ORG) |
+
                 ## Deployment Details
-                - **API Proxy**: ${{ parameters.proxyName }}
-                - **Environment**: ${{ parameters.devEnv }}
-                - **Latest Revision**: $(LATEST_REVISION)
-                - **Deployment Time**: $deploymentTime
-                
-                ## Cleanup Results
-                - **Total Revisions**: $(TOTAL_REVISIONS)
-                - **Revisions Kept**: $(KEPT_COUNT)
-                - **Revisions Deleted**: $(DELETED_COUNT)
-                - **Failed Deletions**: $(FAILED_COUNT)
-                
+                | Item | Value |
+                |------|-------|
+                | API Proxy Name | ${{ parameters.proxyName }} |
+                | Latest Revision | $(LATEST_REVISION) |
+                | Base Path | /${{ parameters.proxyName }} |
+                | Pipeline Run | $(Build.BuildId) |
+                | Triggered By | $(Build.RequestedFor) |
+
+                ## Verification Results
+                | Check | Status | Details |
+                |-------|--------|----------|
+                | Authentication | ✅ Passed | GCP Service Account Authentication |
+                | Bundle Structure | ✅ Verified | Required files present |
+                | Deployment | ✅ Successful | Deployed to ${{ parameters.devEnv }} |
+                | API Proxy Files | ✅ Validated | XML files verified |
+
+                ## Cleanup Summary
+                | Metric | Count |
+                |--------|-------|
+                | Total Revisions | $(TOTAL_REVISIONS) |
+                | Revisions Kept | $(KEPT_COUNT) |
+                | Revisions Deleted | $(DELETED_COUNT) |
+                | Failed Deletions | $(FAILED_COUNT) |
+
+                ## Files Included in Deployment
+                | File Type | Path | Status |
+                |-----------|------|--------|
+                | Proxy Endpoint | /apiproxy/proxies/default.xml | ✅ Included |
+                | Target Endpoint | /apiproxy/targets/default.xml | ✅ Included |
+                | Proxy XML | /apiproxy/${{ parameters.proxyName }}.xml | ✅ Included |
+
+                ## Environment Details
+                | Setting | Value |
+                |---------|-------|
+                | Environment | ${{ parameters.devEnv }} |
+                | Organization | $(APIGEE_ORG) |
+                | Virtual Hosts | secure |
+                | Base Path | /${{ parameters.proxyName }} |
+
                 ## Pipeline Information
-                - **Run ID**: $(Build.BuildId)
-                - **Pipeline**: $(Build.DefinitionName)
-                - **Triggered by**: $(Build.RequestedFor)
-                - **Branch**: $(Build.SourceBranch)
-                
-                ## Environment Status
-                - **Status**: Deployment Successful
-                - **Environment**: ${{ parameters.devEnv }}
-                - **Organization**: $(APIGEE_ORG)
+                | Item | Value |
+                |------|-------|
+                | Pipeline Name | $(Build.DefinitionName) |
+                | Run ID | $(Build.BuildId) |
+                | Branch | $(Build.SourceBranch) |
+                | Triggered By | $(Build.RequestedFor) |
+                | Timestamp | $deploymentTime |
+
+                ## Notes
+                - Deployment completed successfully
+                - Latest revision ($(LATEST_REVISION)) is now active
+                - Cleanup process completed: Kept latest $KEPT_COUNT revisions
+                - All verification checks passed
+
+                ## Next Steps
+                1. Verify API functionality in ${{ parameters.devEnv }} environment
+                2. Check API proxy in Apigee console
+                3. Run tests against the deployed endpoint
+                4. Monitor for any error logs
+
+                _Generated on: $deploymentTime_
                 "@
                 
                 $summaryContent | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md" -Encoding UTF8
