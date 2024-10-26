@@ -45,55 +45,66 @@ stages:
         steps:
           - task: PowerShell@2
             name: authToGCP
-            displayName: 'Authenticate to GCP using WIF'
+            displayName: 'Authenticate to GCP using Service Account'
             inputs:
               targetType: 'inline'
               script: |
                 try {
                     Write-Host "Starting GCP Authentication..."
-
-                     # Set the GOOGLE_APPLICATION_CREDENTIALS environment variable
-                         $serviceAccountJsonPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "service-account.json"
-                         $env:GOOGLE_APPLICATION_CREDENTIALS = $serviceAccountJsonPath
-                         Write-Host "Using service account JSON file: $serviceAccountJsonPath"
-
-                           # Write the service account JSON to a file
-                           $env:GCP_SERVICE_ACCOUNT_JSON | Out-File -FilePath $serviceAccountJsonPath -Force
-
-                         # Authenticate with GCP using the service account
-                          Write-Host "Authenticating with GCP using service account..."
-                         gcloud auth activate-service-account --key-file="$serviceAccountJsonPath"
-
-                           if ($LASTEXITCODE -ne 0) {
-                              throw "Failed to authenticate with GCP using service account"
-                              }
-
-                            # Get and store access token
-                              Write-Host "Getting access token..."
-                                   $accessToken = gcloud auth print-access-token
-                                   if ([string]::IsNullOrEmpty($accessToken)) {
-                                      throw "Failed to get access token"
-                                       }
-
-                               Write-Host "Setting access token as pipeline variable..."
-                                 Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
-                                  Write-Host "Authentication successful"
-                                  }
-                                    catch {
-                                 Write-Error "Authentication failed: $_"
-                                 Write-Host "##[error]Error details: $($_.Exception.Message)"
-                                   Write-Host "##[error]Stack trace: $($_.ScriptStackTrace)"
-                                     exit 1
-                                    }
-                                finally {
-                                   if (Test-Path -Path $serviceAccountJsonPath) {
-                                      Remove-Item -Path $serviceAccountJsonPath -Force
-                                            }
-                                        }
+                    
+                    # Create the service account JSON file
+                    $serviceAccountJsonPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "service-account.json"
+                    Write-Host "Using service account JSON file: $serviceAccountJsonPath"
+                    
+                    # Decode the base64 service account key and save it to file
+                    $serviceAccountJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:GCP_SERVICE_ACCOUNT_KEY))
+                    $serviceAccountJson | Out-File -FilePath $serviceAccountJsonPath -Encoding UTF8 -Force
+                    
+                    # Verify JSON is valid
+                    try {
+                        $null = $serviceAccountJson | ConvertFrom-Json
+                        Write-Host "Service account JSON is valid"
+                    } catch {
+                        throw "Invalid service account JSON: $_"
+                    }
+                    
+                    # Set GOOGLE_APPLICATION_CREDENTIALS environment variable
+                    $env:GOOGLE_APPLICATION_CREDENTIALS = $serviceAccountJsonPath
+                    
+                    # Authenticate with GCP using the service account
+                    Write-Host "Authenticating with GCP using service account..."
+                    gcloud auth activate-service-account --key-file="$serviceAccountJsonPath"
+                    
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to authenticate with GCP using service account"
+                    }
+                    
+                    # Get and store access token
+                    Write-Host "Getting access token..."
+                    $accessToken = gcloud auth print-access-token
+                    if ([string]::IsNullOrEmpty($accessToken)) {
+                        throw "Failed to get access token"
+                    }
+                    
+                    Write-Host "Setting access token as pipeline variable..."
+                    Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
+                    Write-Host "Authentication successful"
+                }
+                catch {
+                    Write-Error "Authentication failed: $_"
+                    Write-Host "##[error]Error details: $($_.Exception.Message)"
+                    Write-Host "##[error]Stack trace: $($_.ScriptStackTrace)"
+                    exit 1
+                }
+                finally {
+                    # Clean up service account file
+                    if (Test-Path -Path $serviceAccountJsonPath) {
+                        Remove-Item -Path $serviceAccountJsonPath -Force
+                        Write-Host "Cleaned up service account JSON file"
+                    }
+                }
             env:
-              AZURE_TOKEN: $(System.AccessToken)
-              WORKLOAD_IDENTITY_PROVIDER: $(WORKLOAD_IDENTITY_PROVIDER)
-              SERVICE_ACCOUNT: $(SERVICE_ACCOUNT)
+              GCP_SERVICE_ACCOUNT_KEY: $(GCP_SERVICE_ACCOUNT_KEY)
 
           - task: Bash@3
             displayName: 'Verify Authentication'
@@ -129,7 +140,7 @@ stages:
       - job: PrepareAndUpload
         displayName: 'Prepare and Upload Bundle'
         variables:
-          ACCESS_TOKEN: $[ dependencies.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
         steps:
           - task: Bash@3
             displayName: 'Install apigeecli'
@@ -209,8 +220,6 @@ stages:
                 - template: templates/deploy-steps.yml@templates
                   parameters:
                     environmentName: ${{ parameters.uatEnv }}
-
-
 
   - stage: Cleanup
     displayName: 'Cleanup and Summary'
