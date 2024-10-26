@@ -126,7 +126,7 @@ stages:
                 
   - stage: Deploy 
     displayName: 'Deploy to Environment'
-    dependsOn: Build  # Only depends on Build stage
+    dependsOn: Build  # Only depends on Build
     variables:
       ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
     jobs:
@@ -158,32 +158,12 @@ stages:
                     replaceExistingArchive: true
 
                 - task: Bash@3
-                  displayName: 'Verify Bundle Structure'
-                  inputs:
-                    targetType: 'inline'
-                    script: |
-                      echo "Verifying bundle structure..."
-                      unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
-                      
-                      # Check if required files exist
-                      unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/proxies/default.xml" > /dev/null || {
-                        echo "Error: Missing or invalid proxies/default.xml"
-                        exit 1
-                      }
-                      
-                      unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/targets/default.xml" > /dev/null || {
-                        echo "Error: Missing or invalid targets/default.xml"
-                        exit 1
-                      }
-
-                - task: Bash@3
                   name: uploadAndDeploy
                   displayName: 'Upload and Deploy Bundle'
                   inputs:
                     targetType: 'inline'
                     script: |
                       # Upload bundle
-                      echo "Uploading bundle..."
                       IMPORT_OUTPUT=$(apigeecli apis create bundle \
                         -n "${{ parameters.proxyName }}" \
                         -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
@@ -191,35 +171,27 @@ stages:
                         --token "$(ACCESS_TOKEN)")
                       
                       # Get revision number
-                      REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
-                      echo "New revision number: $REVISION"
-                      echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$REVISION"
+                      LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
+                      echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
                       
                       # Deploy to environment
-                      echo "Deploying revision $REVISION to ${{ parameters.devEnv }}..."
                       apigeecli apis deploy \
                         --name "${{ parameters.proxyName }}" \
                         --env "${{ parameters.devEnv }}" \
-                        --rev "$REVISION" \
+                        --rev "$LATEST_REVISION" \
                         --org "$(APIGEE_ORG)" \
                         --token "$(ACCESS_TOKEN)" \
                         --ovr
-                      
-                      if [ $? -eq 0 ]; then
-                        echo "Deployment successful!"
-                      else
-                        echo "Deployment failed!"
-                        exit 1
-                      fi
-
-  - stage: Cleanup
+  - stage: PostDeploy
     displayName: 'Cleanup and Summary'
     dependsOn: Deploy
+    variables:
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+      LATEST_REVISION: $[ stageDependencies.Deploy.DeployToDev.outputs['uploadAndDeploy.LATEST_REVISION'] ]
     jobs:
       - job: CleanupRevisions
         displayName: 'Cleanup Old Revisions'
         variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
           PROXY_NAME: ${{ parameters.proxyName }}
         steps:
           - task: Bash@3
@@ -298,7 +270,6 @@ stages:
         displayName: 'Generate Deployment Summary'
         dependsOn: CleanupRevisions
         variables:
-          LATEST_REVISION: $[ dependencies.CleanupRevisions.outputs['uploadAndDeploy.LATEST_REVISION'] ]
           KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
           DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
           FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
