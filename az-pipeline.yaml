@@ -56,13 +56,12 @@ stages:
                     $serviceAccountJsonPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "service-account.json"
                     Write-Host "Using service account JSON file: $serviceAccountJsonPath"
                     
-                    # Decode the base64 service account key and save it to file
-                    $serviceAccountJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:GCP_SERVICE_ACCOUNT_KEY))
-                    $serviceAccountJson | Out-File -FilePath $serviceAccountJsonPath -Encoding UTF8 -Force
+                    # Write the service account JSON directly to file
+                    $env:GCP_SERVICE_ACCOUNT_KEY | Out-File -FilePath $serviceAccountJsonPath -Encoding UTF8 -Force
                     
                     # Verify JSON is valid
                     try {
-                        $null = $serviceAccountJson | ConvertFrom-Json
+                        Get-Content $serviceAccountJsonPath -Raw | ConvertFrom-Json
                         Write-Host "Service account JSON is valid"
                     } catch {
                         throw "Invalid service account JSON: $_"
