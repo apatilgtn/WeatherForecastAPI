@@ -58,38 +58,65 @@ stages:
               targetType: 'inline'
               script: |
                 echo "##[group]🔧 Installing Google Cloud SDK"
-                sudo apt-get install apt-transport-https ca-certificates gnupg
-                echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-                curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
-                sudo apt-get update && sudo apt-get install google-cloud-sdk
+                curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                ./google-cloud-sdk/install.sh --quiet
+                echo "$PWD/google-cloud-sdk/bin" >> $GITHUB_PATH
+                export PATH=$PATH:$PWD/google-cloud-sdk/bin
                 echo "##[section] Google Cloud SDK installed"
 
           - task: Bash@3
-            name: getAccessToken
-            displayName: 'Get Access Token'
+            name: configureAuth
+            displayName: 'Configure GCP Auth'
             inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔐 Authenticating with GCP"
+                echo "##[group]🔐 Configuring Authentication"
                 
-                # Write WIF configuration
-                echo "$(GCP_WIF)" > wif-config.json
+                # Create configuration files
+                mkdir -p $HOME/.config/gcloud
                 
-                # Authenticate using WIF
-                gcloud auth login --cred-file=wif-config.json
+                # Generate credential configuration
+                cat > credential.json << EOF
+                {
+                  "type": "external_account",
+                  "audience": "//iam.googleapis.com/$(WIF_PROVIDER_ID)",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                  "token_url": "https://sts.googleapis.com/v1/token",
+                  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(WIF_SERVICE_ACCOUNT):generateAccessToken",
+                  "credential_source": {
+                    "url": "$(IDENTITY_ENDPOINT)?api-version=2019-08-01",
+                    "headers": {
+                      "X-IDENTITY-HEADER": "$(IDENTITY_HEADER)"
+                    },
+                    "format": {
+                      "type": "json",
+                      "subject_token_field_name": "access_token"
+                    }
+                  }
+                }
+                EOF
                 
-                # Get access token
+                # Configure gcloud
+                gcloud config set project $(GCP_PROJECT_ID)
+                
+                # Authenticate using the credential file
+                gcloud auth login --quiet --cred-file=credential.json
+                
+                # Get and verify access token
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
                 
-                # Save token and clean up
+                # Store token securely
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-                rm wif-config.json
                 
-                echo "##[section] Authentication successful"
+                # Clean up
+                rm -f credential.json
+                
+                echo "##[section] Authentication configured successfully"
 
       - job: ValidateProxy
         displayName: 'Validate API Proxy'
