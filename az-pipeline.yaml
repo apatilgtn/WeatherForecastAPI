@@ -61,36 +61,34 @@ stages:
                 curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
                 tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
                 ./google-cloud-sdk/install.sh --quiet
-                echo "$PWD/google-cloud-sdk/bin" >> $GITHUB_PATH
                 export PATH=$PATH:$PWD/google-cloud-sdk/bin
                 echo "##[section] Google Cloud SDK installed"
 
           - task: Bash@3
-  name: configureAuth
-  displayName: 'Configure GCP Auth with WIF'
-  inputs:
-    targetType: 'inline'
-    script: |
-      echo "##[group]🔐 Configuring Authentication"
-
-      # Set project
-      gcloud config set project $(GCP_PROJECT_ID)
-
-      # Activate Workload Identity Federation with the impersonated service account
-      gcloud auth login --update-adc --quiet \
-        --impersonate-service-account=apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com
-
-      # Get access token
-      TOKEN=$(gcloud auth print-access-token)
-      if [ -z "$TOKEN" ]; then
-        echo "##[error] Failed to get access token"
-        exit 1
-      fi
-      
-      # Store token for use in pipeline
-      echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-      echo "##[section] Authentication configured successfully"
-
+            name: configureAuth
+            displayName: 'Configure GCP Auth with WIF'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "##[group]🔐 Configuring Authentication"
+                
+                # Set project
+                gcloud config set project $(GCP_PROJECT_ID)
+                
+                # Activate Workload Identity Federation with the impersonated service account
+                gcloud auth login --update-adc --quiet \
+                  --impersonate-service-account=apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com
+                
+                # Get access token
+                TOKEN=$(gcloud auth print-access-token)
+                if [ -z "$TOKEN" ]; then
+                  echo "##[error] Failed to get access token"
+                  exit 1
+                fi
+                
+                # Store token for use in pipeline
+                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
+                echo "##[section] Authentication configured successfully"
 
       - job: ValidateProxy
         displayName: 'Validate API Proxy'
@@ -119,11 +117,11 @@ stages:
     displayName: 'Deploy API Proxy'
     dependsOn: Build
     variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
+      ACCESS_TOKEN: $[ stageDependencies.Build.Auth.outputs['configureAuth.ACCESS_TOKEN'] ]
     jobs:
       - deployment: DeployProxy
         displayName: 'Deploy to Environment'
-        environment: nonprod # Simplified environment name
+        environment: nonprod
         strategy:
           runOnce:
             deploy:
