@@ -21,6 +21,13 @@ parameters:
       - 'homerun'
       - 'wow'
       - 'wpay'
+  - name: deploymentEnvironment
+    type: string
+    displayName: 'Deployment Environment'
+    default: 'nonprod'
+    values:
+      - 'nonprod'
+      - 'prod'
   - name: environmentType
     type: string
     displayName: 'Environment Type'
@@ -37,126 +44,45 @@ parameters:
     default: false
 
 variables:
-  - group: apigeeX # Contains APIGEE_ORG, APIGEE_ORG_PROD, GCP_PROJECT_ID
+  - group: apigeeX # Contains APIGEE_ORG and APIGEE_ORG_PROD
   - name: versionId
     value: '$(Build.BuildId)-$(Build.SourceVersion)'
-
-resources:
-  repositories:
-    - repository: self
-      type: git
-      name: $(Build.Repository.Name)
 
 pool:
   vmImage: 'ubuntu-latest'
 
 stages:
-  - stage: Validate
-    displayName: 'Validate Inputs'
-    jobs:
-      - job: ValidateInputs
-        steps:
-          - task: Bash@3
-            name: validateConfig
-            displayName: 'Validate Configuration'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🔍 Validating Configuration"
-                
-                PROCEED=true
-                DEPLOY_TYPE="non-prod"
-                STATUS="pending"
-                
-                if [[ "${{ parameters.isProduction }}" == "true" ]]; then
-                  DEPLOY_TYPE="prod"
-                fi
-                
-                case "${{ parameters.environmentGroup }}" in
-                  "default"|"edd"|"homerun"|"wow"|"wpay"|"prod")
-                    echo "##[section] Environment group validation passed"
-                    ;;
-                  *)
-                    echo "##[error] Invalid environment group"
-                    PROCEED=false
-                    ;;
-                esac
-                
-                case "${{ parameters.environmentType }}" in
-                  "dev"|"test-env"|"test"|"uat"|"prod")
-                    echo "##[section] Environment type validation passed"
-                    ;;
-                  *)
-                    echo "##[error] Invalid environment type"
-                    PROCEED=false
-                    ;;
-                esac
-                
-                if [[ "$PROCEED" == "true" ]]; then
-                  echo "##[section] All validation checks passed"
-                  echo "##vso[task.setvariable variable=canProceed;isOutput=true]true"
-                  echo "##vso[task.setvariable variable=deploymentType;isOutput=true]$DEPLOY_TYPE"
-                else
-                  echo "##vso[task.setvariable variable=canProceed;isOutput=true]false"
-                fi
-
   - stage: Build
     displayName: 'Build and Validate'
-    dependsOn: Validate
-    condition: eq(dependencies.Validate.outputs['ValidateInputs.validateConfig.canProceed'], 'true')
     jobs:
       - job: GCP_Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: Bash@3
-            name: setupGcloud
-            displayName: 'Setup Google Cloud SDK'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🔧 Setting up Google Cloud SDK"
-                # Install gcloud if not present
-                if ! command -v gcloud &> /dev/null; then
-                  echo "Installing Google Cloud SDK..."
-                  curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
-                  tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
-                  ./google-cloud-sdk/install.sh --quiet
-                  echo "##vso[task.prependpath]$PWD/google-cloud-sdk/bin"
-                fi
-                echo "##[section] Google Cloud SDK setup complete"
-
-          - task: Bash@3
+          - task: GoogleCloudSDK@0
             name: authToGCP
             displayName: 'Authenticate to GCP'
             inputs:
+              serviceConnectorType: 'workloadIdentityFederation'
+              serviceConnection: 'GCP-WIF'
+              project: '$(GCP_PROJECT_ID)'
+
+          - task: Bash@3
+            name: getAccessToken
+            displayName: 'Get and Store Access Token'
+            inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔐 Authenticating with GCP"
-                
-                # Set up workload identity federation
-                echo '$(WORKLOAD_IDENTITY_CONFIG)' > workload_identity.json
-                
-                # Authenticate using workload identity
-                gcloud auth login --quiet \
-                  --project=$(GCP_PROJECT_ID) \
-                  --cred-file=workload_identity.json
-                  
-                # Get access token
+                echo "##[group]🔐 Getting Access Token"
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
-                
-                # Save token securely
-                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$TOKEN"
-                echo "##[section] Authentication successful"
-                
-                # Cleanup
-                rm -f workload_identity.json
+                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
+                echo "##[section] Access token retrieved successfully"
 
-      - job: ValidateProxy
-        displayName: 'Validate API Proxy'
+      - job: ApigeeLint
+        displayName: 'Lint Apigee Proxy'
         dependsOn: GCP_Auth
         steps:
           - task: NodeTool@0
@@ -182,11 +108,11 @@ stages:
     displayName: 'Deploy API Proxy'
     dependsOn: Build
     variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
     jobs:
       - deployment: DeployProxy
         displayName: 'Deploy to Environment'
-        environment: ${{ parameters.environmentType }}
+        environment: ${{ parameters.deploymentEnvironment }}
         strategy:
           runOnce:
             deploy:
@@ -232,6 +158,10 @@ stages:
                         --proxy-zip "proxy-bundle.zip")
                       
                       REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision":\s*"\K[^"]+')
+                      if [ -z "$REVISION" ]; then
+                        echo "##[error] Failed to get revision number"
+                        exit 1
+                      fi
                       echo "##vso[task.setvariable variable=REVISION;isOutput=true]$REVISION"
                       echo "##[section] Bundle uploaded with revision: $REVISION"
 
@@ -268,91 +198,3 @@ stages:
                         echo "##[error] Deployment failed"
                         exit 1
                       fi
-
-  - stage: Cleanup
-    displayName: 'Cleanup'
-    dependsOn: Deploy
-    condition: succeeded()
-    variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-    jobs:
-      - job: Cleanup
-        steps:
-          - task: Bash@3
-            displayName: 'Cleanup Old Revisions'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🧹 Cleaning up old revisions"
-                
-                # Keep latest 5 revisions
-                KEEP_COUNT=5
-                
-                # Get all revisions
-                ORG_NAME=$([ "${{ parameters.isProduction }}" == "true" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
-                
-                REVISIONS=$(apigeecli apis list revisions \
-                  --name "${{ parameters.proxyName }}" \
-                  --org "$ORG_NAME" \
-                  --token "$(ACCESS_TOKEN)")
-                
-                # Convert to array and sort
-                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -n))
-                TOTAL=${#REVISION_ARRAY[@]}
-                
-                if [ $TOTAL -gt $KEEP_COUNT ]; then
-                  for ((i=0; i<TOTAL-KEEP_COUNT; i++)); do
-                    REV="${REVISION_ARRAY[$i]}"
-                    echo "Deleting revision $REV..."
-                    
-                    apigeecli apis delete revision \
-                      --name "${{ parameters.proxyName }}" \
-                      --org "$ORG_NAME" \
-                      --rev "$REV" \
-                      --token "$(ACCESS_TOKEN)" || true
-                  done
-                fi
-                
-                echo "##[section] Cleanup complete"
-
-          - task: PowerShell@2
-            displayName: 'Generate Summary'
-            inputs:
-              targetType: 'inline'
-              script: |
-                $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                $summary = @"
-                # 🚀 Apigee Deployment Summary
-                
-                ## 📋 Deployment Information
-                | Category | Details |
-                |----------|---------|
-                | Proxy Name | ${{ parameters.proxyName }} |
-                | Environment | ${{ parameters.environmentType }} |
-                | Status | ✅ Success |
-                | Timestamp | $timestamp |
-                
-                ## 🔍 Environment Details
-                - Group: ${{ parameters.environmentGroup }}
-                - Type: ${{ parameters.environmentType }}
-                - Organization: $(APIGEE_ORG)
-                - Build ID: $(Build.BuildId)
-                
-                ## 📊 Deployment Results
-                - ✅ Validation Passed
-                - ✅ Bundle Created
-                - ✅ Deployment Successful
-                - ✅ Cleanup Completed
-                
-                _Generated at: $timestamp_
-                "@
-                
-                $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
-                
-                Write-Host "##[section] Summary generated"
-
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publish Summary'
-            inputs:
-              pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
-              artifactName: 'DeploymentSummary'
