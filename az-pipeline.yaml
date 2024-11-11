@@ -21,13 +21,6 @@ parameters:
       - 'homerun'
       - 'wow'
       - 'wpay'
-  - name: deploymentEnvironment
-    type: string
-    displayName: 'Deployment Environment'
-    default: 'nonprod'
-    values:
-      - 'nonprod'
-      - 'prod'
   - name: environmentType
     type: string
     displayName: 'Environment Type'
@@ -44,7 +37,7 @@ parameters:
     default: false
 
 variables:
-  - group: apigeeX # Contains APIGEE_ORG and APIGEE_ORG_PROD
+  - group: apigeeX # Contains APIGEE_ORG, APIGEE_ORG_PROD, and GCP_WIF_CONFIG
   - name: versionId
     value: '$(Build.BuildId)-$(Build.SourceVersion)'
 
@@ -55,35 +48,52 @@ stages:
   - stage: Build
     displayName: 'Build and Validate'
     jobs:
-      - job: GCP_Auth
+      - job: Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: GoogleCloudSDK@0
-            name: authToGCP
-            displayName: 'Authenticate to GCP'
-            inputs:
-              serviceConnectorType: 'workloadIdentityFederation'
-              serviceConnection: 'GCP-WIF'
-              project: '$(GCP_PROJECT_ID)'
-
           - task: Bash@3
-            name: getAccessToken
-            displayName: 'Get and Store Access Token'
+            name: installGCloud
+            displayName: 'Install Google Cloud SDK'
             inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔐 Getting Access Token"
+                echo "##[group]🔧 Installing Google Cloud SDK"
+                sudo apt-get install apt-transport-https ca-certificates gnupg
+                echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+                curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+                sudo apt-get update && sudo apt-get install google-cloud-sdk
+                echo "##[section] Google Cloud SDK installed"
+
+          - task: Bash@3
+            name: getAccessToken
+            displayName: 'Get Access Token'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "##[group]🔐 Authenticating with GCP"
+                
+                # Write WIF configuration
+                echo "$(GCP_WIF_CONFIG)" > wif-config.json
+                
+                # Authenticate using WIF
+                gcloud auth login --cred-file=wif-config.json
+                
+                # Get access token
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
+                
+                # Save token and clean up
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-                echo "##[section] Access token retrieved successfully"
+                rm wif-config.json
+                
+                echo "##[section] Authentication successful"
 
-      - job: ApigeeLint
-        displayName: 'Lint Apigee Proxy'
-        dependsOn: GCP_Auth
+      - job: ValidateProxy
+        displayName: 'Validate API Proxy'
+        dependsOn: Auth
         steps:
           - task: NodeTool@0
             inputs:
@@ -108,11 +118,11 @@ stages:
     displayName: 'Deploy API Proxy'
     dependsOn: Build
     variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
+      ACCESS_TOKEN: $[ stageDependencies.Build.Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
     jobs:
       - deployment: DeployProxy
         displayName: 'Deploy to Environment'
-        environment: ${{ parameters.deploymentEnvironment }}
+        environment: nonprod # Simplified environment name
         strategy:
           runOnce:
             deploy:
