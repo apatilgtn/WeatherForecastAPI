@@ -37,7 +37,7 @@ parameters:
     default: false
 
 variables:
-  - group: apigeeX # Contains APIGEE_ORG, APIGEE_ORG_PROD, and GCP_WIF_CONFIG
+  - group: apigeeX
   - name: versionId
     value: '$(Build.BuildId)-$(Build.SourceVersion)'
 
@@ -48,7 +48,6 @@ stages:
   - stage: Build
     displayName: 'Build and Validate'
     jobs:
-      ```yaml
       - job: Auth
         displayName: 'GCP Authentication'
         steps:
@@ -69,7 +68,7 @@ stages:
             name: configureAuth
             displayName: 'Configure GCP Auth with WIF'
             inputs:
-              azureSubscription: 'GCP-WIF'  # Your Azure Service Connection
+              azureSubscription: 'GCP-WIF'
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
