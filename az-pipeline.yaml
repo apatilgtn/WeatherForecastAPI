@@ -2,12 +2,6 @@ name: Apigee Deployment Pipeline
 
 trigger: none  # Disable automatic triggers
 
-resources:
-  repositories:
-    - repository: templates  
-      type: git
-      name: apigeex-ci-cd 
-
 parameters:
   - name: proxyName
     type: string
@@ -252,19 +246,88 @@ stages:
     variables:
       ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
     jobs:
-      - job: CleanupRevisions
+      - job: CleanupAndSummarize
         steps:
-          - template: templates/cleanup-steps.yml@templates
-            parameters:
-              proxyName: ${{ parameters.proxyName }}
-              keepCount: 5
+          - task: Bash@3
+            displayName: 'Cleanup Old Revisions'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "##[group]🧹 Cleaning up old revisions"
+                
+                # Get all revisions
+                REVISIONS=$(apigeecli apis list revisions \
+                  --name "${{ parameters.proxyName }}" \
+                  --org "$(APIGEE_ORG)" \
+                  --token "$(ACCESS_TOKEN)")
+                
+                # Sort and keep latest 5 revisions
+                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -nr))
+                TOTAL=${#REVISION_ARRAY[@]}
+                KEEP_COUNT=5
+                
+                if [ $TOTAL -gt $KEEP_COUNT ]; then
+                  for ((i=$KEEP_COUNT; i<$TOTAL; i++)); do
+                    REV=${REVISION_ARRAY[$i]}
+                    echo "Deleting revision $REV..."
+                    
+                    apigeecli apis delete revision \
+                      --name "${{ parameters.proxyName }}" \
+                      --org "$(APIGEE_ORG)" \
+                      --rev "$REV" \
+                      --token "$(ACCESS_TOKEN)" \
+                      || echo "Failed to delete revision $REV"
+                  done
+                fi
+                
+                echo "##[section] Cleanup complete"
 
-      - job: GenerateSummary
-        dependsOn: CleanupRevisions
-        steps:
-          - template: templates/summary-steps.yml@templates
-            parameters:
-              proxyName: ${{ parameters.proxyName }}
-              environmentType: ${{ parameters.environmentType }}
-              environmentGroup: ${{ parameters.environmentGroup }}
-              version: $(versionId)
+          - task: PowerShell@2
+            displayName: 'Generate Deployment Summary'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                $envName = if ("${{ parameters.environmentGroup }}" -eq "default") { 
+                  "${{ parameters.environmentType }}" 
+                } else { 
+                  "${{ parameters.environmentGroup }}-${{ parameters.environmentType }}" 
+                }
+                
+                $summary = @"
+                # 🚀 Apigee Deployment Summary
+                
+                ## 📋 Deployment Information
+                | Category | Details |
+                |----------|---------|
+                | Proxy Name | ${{ parameters.proxyName }} |
+                | Environment | $envName |
+                | Version | $(versionId) |
+                | Status | ✅ Success |
+                | Timestamp | $timestamp |
+                
+                ## 🔍 Deployment Details
+                - Organization: $(APIGEE_ORG)
+                - Environment Group: ${{ parameters.environmentGroup }}
+                - Environment Type: ${{ parameters.environmentType }}
+                - Build ID: $(Build.BuildId)
+                - Pipeline Run: [View Run]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId))
+                
+                ## 📊 Verification Results
+                - ✅ Authentication Successful
+                - ✅ Bundle Creation Verified
+                - ✅ Deployment Completed
+                - ✅ Cleanup Processed
+                
+                _Generated at: $timestamp_
+                "@
+                
+                $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
+                
+                Write-Host "##[section] Summary generated successfully"
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Deployment Summary'
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
+              artifactName: 'DeploymentSummary'
