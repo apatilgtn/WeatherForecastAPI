@@ -66,57 +66,31 @@ stages:
                 echo "##[section] Google Cloud SDK installed"
 
           - task: Bash@3
-            name: configureAuth
-            displayName: 'Configure GCP Auth'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🔐 Configuring Authentication"
-                
-                # Create configuration files
-                mkdir -p $HOME/.config/gcloud
-                
-                # Generate credential configuration
-                cat > credential.json << EOF
-                {
-                  "type": "external_account",
-                  "audience": "//iam.googleapis.com/$(WIF_PROVIDER_ID)",
-                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-                  "token_url": "https://sts.googleapis.com/v1/token",
-                  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$(WIF_SERVICE_ACCOUNT):generateAccessToken",
-                  "credential_source": {
-                    "url": "$(IDENTITY_ENDPOINT)?api-version=2019-08-01",
-                    "headers": {
-                      "X-IDENTITY-HEADER": "$(IDENTITY_HEADER)"
-                    },
-                    "format": {
-                      "type": "json",
-                      "subject_token_field_name": "access_token"
-                    }
-                  }
-                }
-                EOF
-                
-                # Configure gcloud
-                gcloud config set project $(GCP_PROJECT_ID)
-                
-                # Authenticate using the credential file
-                gcloud auth login --quiet --cred-file=credential.json
-                
-                # Get and verify access token
-                TOKEN=$(gcloud auth print-access-token)
-                if [ -z "$TOKEN" ]; then
-                  echo "##[error] Failed to get access token"
-                  exit 1
-                fi
-                
-                # Store token securely
-                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-                
-                # Clean up
-                rm -f credential.json
-                
-                echo "##[section] Authentication configured successfully"
+  name: configureAuth
+  displayName: 'Configure GCP Auth with WIF'
+  inputs:
+    targetType: 'inline'
+    script: |
+      echo "##[group]🔐 Configuring Authentication"
+
+      # Set project
+      gcloud config set project $(GCP_PROJECT_ID)
+
+      # Activate Workload Identity Federation with the impersonated service account
+      gcloud auth login --update-adc --quiet \
+        --impersonate-service-account=apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com
+
+      # Get access token
+      TOKEN=$(gcloud auth print-access-token)
+      if [ -z "$TOKEN" ]; then
+        echo "##[error] Failed to get access token"
+        exit 1
+      fi
+      
+      # Store token for use in pipeline
+      echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
+      echo "##[section] Authentication configured successfully"
+
 
       - job: ValidateProxy
         displayName: 'Validate API Proxy'
