@@ -17,95 +17,117 @@ parameters:
     type: string
     displayName: 'Proxy Directory'
     default: 'apiproxy'
-  - name: devEnv
+  - name: environmentGroup
     type: string
-    displayName: 'Development Environment'
+    displayName: 'Environment Group'
+    default: 'default'
+    values:
+      - 'default'
+      - 'edd'
+      - 'homerun'
+      - 'wow'
+      - 'wpay'
+  - name: environmentType
+    type: string
+    displayName: 'Environment Type'
     default: 'test-env'
+    values:
+      - 'dev'
+      - 'test-env'
+      - 'test'
+      - 'uat'
+      - 'prod'
+  - name: isProduction
+    type: boolean
+    displayName: 'Is Production Deployment?'
+    default: false
 
 variables:
-  - group: apigeeX
+  - group: apigeeX  # Contains APIGEE_ORG, APIGEE_ORG_PROD
+  - name: versionId
+    value: '$(Build.BuildId)-$(Build.SourceVersion)'
 
 pool:
   vmImage: 'ubuntu-latest'
 
 stages:
+  - stage: Validate
+    displayName: 'Validate Inputs'
+    jobs:
+      - job: ValidateInputs
+        steps:
+          - task: Bash@3
+            name: validateConfig
+            displayName: 'Validate Configuration'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "##[group]🔍 Validating Configuration"
+                
+                PROCEED=true
+                DEPLOY_TYPE="non-prod"
+                STATUS="pending"
+                
+                if [[ "${{ parameters.isProduction }}" == "true" ]]; then
+                  DEPLOY_TYPE="prod"
+                fi
+                
+                case "${{ parameters.environmentGroup }}" in
+                  "default"|"edd"|"homerun"|"wow"|"wpay"|"prod")
+                    echo "##[section] Environment group validation passed"
+                    ;;
+                  *)
+                    echo "##[error] Invalid environment group"
+                    PROCEED=false
+                    ;;
+                esac
+                
+                case "${{ parameters.environmentType }}" in
+                  "dev"|"test-env"|"test"|"uat"|"prod")
+                    echo "##[section] Environment type validation passed"
+                    ;;
+                  *)
+                    echo "##[error] Invalid environment type"
+                    PROCEED=false
+                    ;;
+                esac
+                
+                if [[ "$PROCEED" == "true" ]]; then
+                  echo "##[section] All validation checks passed"
+                  echo "##vso[task.setvariable variable=canProceed;isOutput=true]true"
+                  echo "##vso[task.setvariable variable=deploymentType;isOutput=true]$DEPLOY_TYPE"
+                else
+                  echo "##vso[task.setvariable variable=canProceed;isOutput=true]false"
+                fi
+
   - stage: Build
     displayName: 'Build and Validate'
+    dependsOn: Validate
+    condition: eq(dependencies.Validate.outputs['ValidateInputs.validateConfig.canProceed'], 'true')
     jobs:
       - job: GCP_Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: PowerShell@2
+          - task: GoogleCloudSDK@0
             name: authToGCP
-            displayName: 'Authenticate to GCP using Service Account'
+            displayName: 'Authenticate to GCP using Workload Identity'
             inputs:
-              targetType: 'inline'
-              script: |
-                try {
-                    Write-Host "Starting GCP Authentication..."
-                    
-                    # Create the service account JSON file
-                    $serviceAccountJsonPath = Join-Path -Path $env:AGENT_TEMPDIRECTORY -ChildPath "service-account.json"
-                    Write-Host "Using service account JSON file: $serviceAccountJsonPath"
-                    
-                    # Write the service account JSON directly to file
-                    $env:GCP_SERVICE_ACCOUNT_KEY | Out-File -FilePath $serviceAccountJsonPath -Encoding UTF8 -Force
-                    
-                    # Verify JSON is valid
-                    try {
-                        Get-Content $serviceAccountJsonPath -Raw | ConvertFrom-Json
-                        Write-Host "Service account JSON is valid"
-                    } catch {
-                        throw "Invalid service account JSON: $_"
-                    }
-                    
-                    # Set GOOGLE_APPLICATION_CREDENTIALS environment variable
-                    $env:GOOGLE_APPLICATION_CREDENTIALS = $serviceAccountJsonPath
-                    
-                    # Authenticate with GCP using the service account
-                    Write-Host "Authenticating with GCP using service account..."
-                    gcloud auth activate-service-account --key-file="$serviceAccountJsonPath"
-                    
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Failed to authenticate with GCP using service account"
-                    }
-                    
-                    # Get and store access token
-                    Write-Host "Getting access token..."
-                    $accessToken = gcloud auth print-access-token
-                    if ([string]::IsNullOrEmpty($accessToken)) {
-                        throw "Failed to get access token"
-                    }
-                    
-                    Write-Host "Setting access token as pipeline variable..."
-                    Write-Host "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$accessToken"
-                    Write-Host "Authentication successful"
-                }
-                catch {
-                    Write-Error "Authentication failed: $_"
-                    Write-Host "##[error]Error details: $($_.Exception.Message)"
-                    Write-Host "##[error]Stack trace: $($_.ScriptStackTrace)"
-                    exit 1
-                }
-                finally {
-                    # Clean up service account file
-                    if (Test-Path -Path $serviceAccountJsonPath) {
-                        Remove-Item -Path $serviceAccountJsonPath -Force
-                        Write-Host "Cleaned up service account JSON file"
-                    }
-                }
-            env:
-              GCP_SERVICE_ACCOUNT_KEY: $(GCP_SERVICE_ACCOUNT_KEY)
+              serviceConnection: 'GCP-WIF'  # Your Workload Identity Federation service connection
+              commands: 'auth print-access-token'
 
           - task: Bash@3
-            displayName: 'Verify Authentication'
+            name: getAccessToken
+            displayName: 'Get and Store Access Token'
             inputs:
               targetType: 'inline'
               script: |
-                set -e
-                echo "Verifying authentication..."
-                gcloud auth list
-                echo "Verification complete"
+                TOKEN=$(gcloud auth print-access-token)
+                if [ -z "$TOKEN" ]; then
+                  echo "##[error] Failed to get access token"
+                  exit 1
+                fi
+                echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$TOKEN"
+                echo "##[section] Access token retrieved successfully"
 
       - job: ApigeeLint
         displayName: 'Lint Apigee Proxy'
@@ -121,25 +143,37 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
+                echo "##[group]🔍 Running Apigee Lint"
                 npm install -g apigeelint
                 apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
-                
-  - stage: Prepare
-    displayName: 'Prepare Bundle'
-    dependsOn: Build
+                if [ $? -ne 0 ]; then
+                  echo "##[error] Apigee lint failed"
+                  exit 1
+                fi
+                echo "##[section] Lint checks passed"
+
+  - stage: PrepareAndDeploy
+    displayName: 'Prepare and Deploy'
+    dependsOn: 
+      - Validate
+      - Build
+    condition: and(succeeded(), eq(dependencies.Validate.outputs['ValidateInputs.validateConfig.canProceed'], 'true'))
+    variables:
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
+      deploymentType: $[ stageDependencies.Validate.outputs['ValidateInputs.validateConfig.deploymentType'] ]
     jobs:
-      - job: PrepareAndUpload
-        displayName: 'Prepare and Upload Bundle'
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
+      - job: PrepareBundle
         steps:
           - task: Bash@3
             displayName: 'Install apigeecli'
             inputs:
               targetType: 'inline'
               script: |
+                echo "##[group]🔧 Installing Apigee CLI"
+                mkdir -p $HOME/.apigeecli/bin
                 curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
                 echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+                echo "##[section] apigeecli installed successfully"
 
           - task: ArchiveFiles@2
             displayName: 'Create API Bundle'
@@ -147,245 +181,90 @@ stages:
               rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
               includeRootFolder: true
               archiveType: 'zip'
-              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy.zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy-$(versionId).zip'
               replaceExistingArchive: true
 
           - task: Bash@3
-            displayName: 'Verify Bundle Structure'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "Verifying bundle structure..."
-                unzip -l "$(Build.ArtifactStagingDirectory)/proxy.zip"
-                
-                # Check if required files exist
-                unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/proxies/default.xml" > /dev/null || {
-                  echo "Error: Missing or invalid proxies/default.xml"
-                  exit 1
-                }
-                
-                unzip -p "$(Build.ArtifactStagingDirectory)/proxy.zip" "apiproxy/targets/default.xml" > /dev/null || {
-                  echo "Error: Missing or invalid targets/default.xml"
-                  exit 1
-                }
-
-          - task: Bash@3
             name: uploadBundle
-            displayName: 'Upload and Get Revision'
+            displayName: 'Upload Bundle'
             inputs:
               targetType: 'inline'
               script: |
+                echo "##[group]📤 Uploading Bundle"
+                ORG_NAME=$([ "$(deploymentType)" == "prod" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
+                
                 IMPORT_OUTPUT=$(apigeecli apis create bundle \
                   -n "${{ parameters.proxyName }}" \
-                  -p "$(Build.ArtifactStagingDirectory)/proxy.zip" \
-                  --org "$(APIGEE_ORG)" \
+                  -p "$(Build.ArtifactStagingDirectory)/proxy-$(versionId).zip" \
+                  --org "$ORG_NAME" \
                   --token "$(ACCESS_TOKEN)")
                 
-                LATEST_REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision": "\K[^"]+')
-                echo "##vso[task.setvariable variable=LATEST_REVISION;isOutput=true]$LATEST_REVISION"
+                REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision":\s*"\K[^"]+')
+                echo "##vso[task.setvariable variable=REVISION;isOutput=true]$REVISION"
+                echo "##[section] Bundle uploaded successfully with revision $REVISION"
 
-  - stage: Deploy 
-    displayName: 'Deploy to Environment'
-    dependsOn: 
-      - Build
-      - Prepare
-    variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-      LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-    jobs:
-      - deployment: DeployToDev
-        displayName: 'Deploy to Dev'
-        environment: development
+      - deployment: DeployProxy
+        displayName: 'Deploy Proxy'
+        dependsOn: PrepareBundle
+        environment: ${{ parameters.environmentType }}
         variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-          PROXY_NAME: ${{ parameters.proxyName }}
+          REVISION: $[ dependencies.PrepareBundle.outputs['uploadBundle.REVISION'] ]
         strategy:
           runOnce:
             deploy:
               steps:
-                - template: templates/deploy-steps.yml@templates
-                  parameters:
-                    environmentName: ${{ parameters.devEnv }}
+                - task: Bash@3
+                  displayName: 'Deploy to Environment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "##[group]🚀 Deploying Proxy"
+                      
+                      # Determine organization and environment
+                      ORG_NAME=$([ "$(deploymentType)" == "prod" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
+                      ENV_NAME="${{ parameters.environmentGroup }}-${{ parameters.environmentType }}"
+                      if [[ "${{ parameters.environmentGroup }}" == "default" ]]; then
+                        ENV_NAME="${{ parameters.environmentType }}"
+                      fi
+                      
+                      echo "Deploying to $ENV_NAME in $ORG_NAME"
+                      
+                      apigeecli apis deploy \
+                        --name "${{ parameters.proxyName }}" \
+                        --org "$ORG_NAME" \
+                        --env "$ENV_NAME" \
+                        --rev "$(REVISION)" \
+                        --token "$(ACCESS_TOKEN)" \
+                        --ovr \
+                        --wait
+                      
+                      if [ $? -eq 0 ]; then
+                        echo "##[section] Deployment successful"
+                      else
+                        echo "##[error] Deployment failed"
+                        exit 1
+                      fi
 
   - stage: Cleanup
     displayName: 'Cleanup and Summary'
-    dependsOn: Deploy
+    dependsOn: PrepareAndDeploy
+    condition: succeeded()
+    variables:
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
     jobs:
       - job: CleanupRevisions
-        displayName: 'Cleanup Old Revisions'
-        variables:
-          ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
-          PROXY_NAME: ${{ parameters.proxyName }}
         steps:
-          - task: Bash@3
-            name: cleanup
-            displayName: 'Delete Older Revisions'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "Starting cleanup of old revisions..."
-                
-                # Install apigeecli if not already installed
-                if ! command -v apigeecli &> /dev/null; then
-                  curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-                  echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-                fi
-                
-                # Get all revisions
-                REVISIONS=$(apigeecli apis list revisions \
-                  --name "$PROXY_NAME" \
-                  --org "$(APIGEE_ORG)" \
-                  --token "$(ACCESS_TOKEN)" \
-                  --disable-check)
-                
-                # Convert to array and sort
-                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -n))
-                TOTAL_REVISIONS=${#REVISION_ARRAY[@]}
-                
-                # Keep the latest 5 revisions
-                KEEP_COUNT=5
-                DELETE_COUNT=0
-                FAILED_COUNT=0
-                
-                if [ $TOTAL_REVISIONS -gt $KEEP_COUNT ]; then
-                  # Calculate how many to delete
-                  TO_DELETE=$((TOTAL_REVISIONS - KEEP_COUNT))
-                  
-                  for ((i=0; i<$TO_DELETE; i++)); do
-                    REV="${REVISION_ARRAY[$i]}"
-                    echo "Checking revision $REV..."
-                    
-                    # Check if revision is deployed
-                    DEPLOYMENT_STATUS=$(apigeecli apis list deployments \
-                      --name "$PROXY_NAME" \
-                      --org "$(APIGEE_ORG)" \
-                      --token "$(ACCESS_TOKEN)" \
-                      --rev "$REV" \
-                      --disable-check)
-                    
-                    if [[ $DEPLOYMENT_STATUS == *"not deployed"* ]]; then
-                      echo "Deleting revision $REV..."
-                      if apigeecli apis delete revision \
-                        --name "$PROXY_NAME" \
-                        --org "$(APIGEE_ORG)" \
-                        --token "$(ACCESS_TOKEN)" \
-                        --rev "$REV" \
-                        --disable-check; then
-                        ((DELETE_COUNT++))
-                        echo "Successfully deleted revision $REV"
-                      else
-                        ((FAILED_COUNT++))
-                        echo "Failed to delete revision $REV"
-                      fi
-                    else
-                      echo "Skipping deployed revision $REV"
-                    fi
-                  done
-                fi
-                
-                # Set output variables
-                echo "##vso[task.setvariable variable=KEPT_COUNT;isOutput=true]$KEEP_COUNT"
-                echo "##vso[task.setvariable variable=DELETED_COUNT;isOutput=true]$DELETE_COUNT"
-                echo "##vso[task.setvariable variable=FAILED_COUNT;isOutput=true]$FAILED_COUNT"
-                echo "##vso[task.setvariable variable=TOTAL_REVISIONS;isOutput=true]$TOTAL_REVISIONS"
+          - template: templates/cleanup-steps.yml@templates
+            parameters:
+              proxyName: ${{ parameters.proxyName }}
+              keepCount: 5
 
-      - job: DeploymentSummary
-        displayName: 'Generate Deployment Summary'
+      - job: GenerateSummary
         dependsOn: CleanupRevisions
-        variables:
-          LATEST_REVISION: $[ stageDependencies.Prepare.PrepareAndUpload.outputs['uploadBundle.LATEST_REVISION'] ]
-          KEPT_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.KEPT_COUNT'] ]
-          DELETED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.DELETED_COUNT'] ]
-          FAILED_COUNT: $[ dependencies.CleanupRevisions.outputs['cleanup.FAILED_COUNT'] ]
-          TOTAL_REVISIONS: $[ dependencies.CleanupRevisions.outputs['cleanup.TOTAL_REVISIONS'] ]
         steps:
-          - task: PowerShell@2
-            displayName: 'Generate Summary'
-            inputs:
-              targetType: 'inline'
-              script: |
-                $deploymentTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                
-                $summaryContent = @"
-                # Apigee Deployment Summary
-
-                ## Quick Overview
-                | Category | Value |
-                |----------|--------|
-                | Status | ✅ Deployment Successful |
-                | Timestamp | $deploymentTime |
-                | Environment | ${{ parameters.devEnv }} |
-                | Organization | $(APIGEE_ORG) |
-
-                ## Deployment Details
-                | Item | Value |
-                |------|-------|
-                | API Proxy Name | ${{ parameters.proxyName }} |
-                | Latest Revision | $(LATEST_REVISION) |
-                | Base Path | /${{ parameters.proxyName }} |
-                | Pipeline Run | $(Build.BuildId) |
-                | Triggered By | $(Build.RequestedFor) |
-
-                ## Verification Results
-                | Check | Status | Details |
-                |-------|--------|----------|
-                | Authentication | ✅ Passed | GCP Service Account Authentication |
-                | Bundle Structure | ✅ Verified | Required files present |
-                | Deployment | ✅ Successful | Deployed to ${{ parameters.devEnv }} |
-                | API Proxy Files | ✅ Validated | XML files verified |
-
-                ## Cleanup Summary
-                | Metric | Count |
-                |--------|-------|
-                | Total Revisions | $(TOTAL_REVISIONS) |
-                | Revisions Kept | $(KEPT_COUNT) |
-                | Revisions Deleted | $(DELETED_COUNT) |
-                | Failed Deletions | $(FAILED_COUNT) |
-
-                ## Files Included in Deployment
-                | File Type | Path | Status |
-                |-----------|------|--------|
-                | Proxy Endpoint | /apiproxy/proxies/default.xml | ✅ Included |
-                | Target Endpoint | /apiproxy/targets/default.xml | ✅ Included |
-                | Proxy XML | /apiproxy/${{ parameters.proxyName }}.xml | ✅ Included |
-
-                ## Environment Details
-                | Setting | Value |
-                |---------|-------|
-                | Environment | ${{ parameters.devEnv }} |
-                | Organization | $(APIGEE_ORG) |
-                | Virtual Hosts | secure |
-                | Base Path | /${{ parameters.proxyName }} |
-
-                ## Pipeline Information
-                | Item | Value |
-                |------|-------|
-                | Pipeline Name | $(Build.DefinitionName) |
-                | Run ID | $(Build.BuildId) |
-                | Branch | $(Build.SourceBranch) |
-                | Triggered By | $(Build.RequestedFor) |
-                | Timestamp | $deploymentTime |
-
-                ## Notes
-                - Deployment completed successfully
-                - Latest revision ($(LATEST_REVISION)) is now active
-                - Cleanup process completed: Kept latest $KEPT_COUNT revisions
-                - All verification checks passed
-
-                ## Next Steps
-                1. Verify API functionality in ${{ parameters.devEnv }} environment
-                2. Check API proxy in Apigee console
-                3. Run tests against the deployed endpoint
-                4. Monitor for any error logs
-
-                _Generated on: $deploymentTime_
-                "@
-                
-                $summaryContent | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md" -Encoding UTF8
-
-          - task: PublishBuildArtifacts@1
-            condition: always()
-            inputs:
-              pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
-              artifactName: 'DeploymentSummary'
+          - template: templates/summary-steps.yml@templates
+            parameters:
+              proxyName: ${{ parameters.proxyName }}
+              environmentType: ${{ parameters.environmentType }}
+              environmentGroup: ${{ parameters.environmentGroup }}
+              version: $(versionId)
