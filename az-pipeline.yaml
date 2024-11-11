@@ -73,7 +73,7 @@ stages:
                 echo "##[group]🔐 Authenticating with GCP"
                 
                 # Write WIF configuration
-                echo "$(GCP_WIF_CONFIG)" > wif-config.json
+                echo "$(GCP_WIF)" > wif-config.json
                 
                 # Authenticate using WIF
                 gcloud auth login --cred-file=wif-config.json
