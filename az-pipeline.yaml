@@ -51,44 +51,34 @@ stages:
       - job: Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: Bash@3
-            name: installGCloud
+          - task: GoogleCloudSdkTool@1
             displayName: 'Install Google Cloud SDK'
             inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🔧 Installing Google Cloud SDK"
-                curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
-                tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
-                ./google-cloud-sdk/install.sh --quiet
-                export PATH=$PATH:$PWD/google-cloud-sdk/bin
-                echo "##[section] Google Cloud SDK installed"
+              version: 'latest'
 
-          - task: Bash@3
+          - task: GoogleCloudSetup@1
             name: configureAuth
             displayName: 'Configure GCP Auth with WIF'
             inputs:
+              serviceConnectorType: 'workloadIdentityFederation'
+              serviceConnection: 'GCP-WIF'
+              configAuth: true
+              projectId: '$(GCP_PROJECT_ID)'
+
+          - task: Bash@3
+            name: getToken
+            displayName: 'Get GCP Access Token'
+            inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔐 Configuring Authentication"
-                
-                # Set project
-                gcloud config set project $(GCP_PROJECT_ID)
-                
-                # Activate Workload Identity Federation with the impersonated service account
-                gcloud auth login --update-adc --quiet \
-                  --impersonate-service-account=apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com
-                
-                # Get access token
+                echo "##[group]🔐 Getting Access Token"
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
-                
-                # Store token for use in pipeline
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-                echo "##[section] Authentication configured successfully"
+                echo "##[section] Successfully retrieved access token"
 
       - job: ValidateProxy
         displayName: 'Validate API Proxy'
