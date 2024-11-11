@@ -48,37 +48,78 @@ stages:
   - stage: Build
     displayName: 'Build and Validate'
     jobs:
+      ```yaml
       - job: Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: GoogleCloudSdkTool@1
-            displayName: 'Install Google Cloud SDK'
-            inputs:
-              version: 'latest'
-
-          - task: GoogleCloudSetup@1
-            name: configureAuth
-            displayName: 'Configure GCP Auth with WIF'
-            inputs:
-              serviceConnectorType: 'workloadIdentityFederation'
-              serviceConnection: 'GCP-WIF'
-              configAuth: true
-              projectId: '$(GCP_PROJECT_ID)'
-
           - task: Bash@3
-            name: getToken
-            displayName: 'Get GCP Access Token'
+            name: installGCloud
+            displayName: 'Install Google Cloud SDK'
             inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔐 Getting Access Token"
+                echo "##[group]🔧 Installing Google Cloud SDK"
+                curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                ./google-cloud-sdk/install.sh --quiet
+                export PATH=$PATH:$PWD/google-cloud-sdk/bin
+                echo "##[section] Google Cloud SDK installed"
+
+          - task: AzureCLI@2
+            name: configureAuth
+            displayName: 'Configure GCP Auth with WIF'
+            inputs:
+              azureSubscription: 'GCP-WIF'  # Your Azure Service Connection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "##[group]🔐 Configuring Authentication"
+                
+                # Get Azure Managed Identity Token
+                echo "Getting Azure token..."
+                AZURE_TOKEN=$(curl -s "$IDENTITY_ENDPOINT?api-version=2019-08-01&resource=https://iam.googleapis.com/" \
+                  -H "X-IDENTITY-HEADER:$IDENTITY_HEADER")
+                
+                # Create credential configuration
+                cat > wif-config.json << EOF
+                {
+                  "type": "external_account",
+                  "audience": "//iam.googleapis.com/projects/$(GCP_PROJECT_NUMBER)/locations/global/workloadIdentityPools/azure-pool/providers/azure-provider",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                  "token_url": "https://sts.googleapis.com/v1/token",
+                  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/apigeex-az@lofty-advantage-439308-i1.iam.gserviceaccount.com:generateAccessToken",
+                  "credential_source": {
+                    "file": "azure_token.txt",
+                    "format": {
+                      "type": "text"
+                    }
+                  }
+                }
+                EOF
+                
+                # Save Azure token
+                echo "$AZURE_TOKEN" > azure_token.txt
+                
+                # Configure gcloud
+                gcloud config set project $(GCP_PROJECT_ID)
+                
+                # Authenticate using the WIF configuration
+                gcloud auth login --cred-file=wif-config.json
+                
+                # Get and verify access token
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
+                
+                # Store token for pipeline
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true;issecret=true]$TOKEN"
-                echo "##[section] Successfully retrieved access token"
+                
+                # Cleanup sensitive files
+                rm -f wif-config.json azure_token.txt
+                
+                echo "##[section] Authentication configured successfully"
 
       - job: ValidateProxy
         displayName: 'Validate API Proxy'
