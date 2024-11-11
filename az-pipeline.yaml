@@ -1,6 +1,6 @@
 name: Apigee Deployment Pipeline
 
-trigger: none  # Disable automatic triggers
+trigger: none
 
 parameters:
   - name: proxyName
@@ -37,9 +37,15 @@ parameters:
     default: false
 
 variables:
-  - group: apigeeX  # Contains APIGEE_ORG, APIGEE_ORG_PROD
+  - group: apigeeX # Contains APIGEE_ORG, APIGEE_ORG_PROD, GCP_PROJECT_ID
   - name: versionId
     value: '$(Build.BuildId)-$(Build.SourceVersion)'
+
+resources:
+  repositories:
+    - repository: self
+      type: git
+      name: $(Build.Repository.Name)
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -102,29 +108,55 @@ stages:
       - job: GCP_Auth
         displayName: 'GCP Authentication'
         steps:
-          - task: GoogleCloudSDK@0
-            name: authToGCP
-            displayName: 'Authenticate to GCP using Workload Identity'
-            inputs:
-              serviceConnection: 'GCP-WIF'  # Your Workload Identity Federation service connection
-              commands: 'auth print-access-token'
-
           - task: Bash@3
-            name: getAccessToken
-            displayName: 'Get and Store Access Token'
+            name: setupGcloud
+            displayName: 'Setup Google Cloud SDK'
             inputs:
               targetType: 'inline'
               script: |
+                echo "##[group]🔧 Setting up Google Cloud SDK"
+                # Install gcloud if not present
+                if ! command -v gcloud &> /dev/null; then
+                  echo "Installing Google Cloud SDK..."
+                  curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                  tar -xf google-cloud-cli-438.0.0-linux-x86_64.tar.gz
+                  ./google-cloud-sdk/install.sh --quiet
+                  echo "##vso[task.prependpath]$PWD/google-cloud-sdk/bin"
+                fi
+                echo "##[section] Google Cloud SDK setup complete"
+
+          - task: Bash@3
+            name: authToGCP
+            displayName: 'Authenticate to GCP'
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "##[group]🔐 Authenticating with GCP"
+                
+                # Set up workload identity federation
+                echo '$(WORKLOAD_IDENTITY_CONFIG)' > workload_identity.json
+                
+                # Authenticate using workload identity
+                gcloud auth login --quiet \
+                  --project=$(GCP_PROJECT_ID) \
+                  --cred-file=workload_identity.json
+                  
+                # Get access token
                 TOKEN=$(gcloud auth print-access-token)
                 if [ -z "$TOKEN" ]; then
                   echo "##[error] Failed to get access token"
                   exit 1
                 fi
+                
+                # Save token securely
                 echo "##vso[task.setvariable variable=ACCESS_TOKEN;isOutput=true]$TOKEN"
-                echo "##[section] Access token retrieved successfully"
+                echo "##[section] Authentication successful"
+                
+                # Cleanup
+                rm -f workload_identity.json
 
-      - job: ApigeeLint
-        displayName: 'Lint Apigee Proxy'
+      - job: ValidateProxy
+        displayName: 'Validate API Proxy'
         dependsOn: GCP_Auth
         steps:
           - task: NodeTool@0
@@ -133,93 +165,91 @@ stages:
             displayName: 'Install Node.js'
 
           - task: Bash@3
-            displayName: 'Run Apigee Lint'
+            displayName: 'Run apigeelint'
             inputs:
               targetType: 'inline'
               script: |
-                echo "##[group]🔍 Running Apigee Lint"
+                echo "##[group]🔍 Validating API Proxy"
                 npm install -g apigeelint
                 apigeelint -s ${{ parameters.proxyDirectory }} -f table.js
                 if [ $? -ne 0 ]; then
-                  echo "##[error] Apigee lint failed"
+                  echo "##[error] API proxy validation failed"
                   exit 1
                 fi
-                echo "##[section] Lint checks passed"
+                echo "##[section] API proxy validation passed"
 
-  - stage: PrepareAndDeploy
-    displayName: 'Prepare and Deploy'
-    dependsOn: 
-      - Validate
-      - Build
-    condition: and(succeeded(), eq(dependencies.Validate.outputs['ValidateInputs.validateConfig.canProceed'], 'true'))
+  - stage: Deploy
+    displayName: 'Deploy API Proxy'
+    dependsOn: Build
     variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
-      deploymentType: $[ stageDependencies.Validate.outputs['ValidateInputs.validateConfig.deploymentType'] ]
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
     jobs:
-      - job: PrepareBundle
-        steps:
-          - task: Bash@3
-            displayName: 'Install apigeecli'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]🔧 Installing Apigee CLI"
-                mkdir -p $HOME/.apigeecli/bin
-                curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
-                echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
-                echo "##[section] apigeecli installed successfully"
-
-          - task: ArchiveFiles@2
-            displayName: 'Create API Bundle'
-            inputs:
-              rootFolderOrFile: '$(Build.SourcesDirectory)/${{ parameters.proxyDirectory }}'
-              includeRootFolder: true
-              archiveType: 'zip'
-              archiveFile: '$(Build.ArtifactStagingDirectory)/proxy-$(versionId).zip'
-              replaceExistingArchive: true
-
-          - task: Bash@3
-            name: uploadBundle
-            displayName: 'Upload Bundle'
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "##[group]📤 Uploading Bundle"
-                ORG_NAME=$([ "$(deploymentType)" == "prod" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
-                
-                IMPORT_OUTPUT=$(apigeecli apis create bundle \
-                  -n "${{ parameters.proxyName }}" \
-                  -p "$(Build.ArtifactStagingDirectory)/proxy-$(versionId).zip" \
-                  --org "$ORG_NAME" \
-                  --token "$(ACCESS_TOKEN)")
-                
-                REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision":\s*"\K[^"]+')
-                echo "##vso[task.setvariable variable=REVISION;isOutput=true]$REVISION"
-                echo "##[section] Bundle uploaded successfully with revision $REVISION"
-
       - deployment: DeployProxy
-        displayName: 'Deploy Proxy'
-        dependsOn: PrepareBundle
+        displayName: 'Deploy to Environment'
         environment: ${{ parameters.environmentType }}
-        variables:
-          REVISION: $[ dependencies.PrepareBundle.outputs['uploadBundle.REVISION'] ]
         strategy:
           runOnce:
             deploy:
               steps:
+                - checkout: self
+                
                 - task: Bash@3
-                  displayName: 'Deploy to Environment'
+                  displayName: 'Install apigeecli'
                   inputs:
                     targetType: 'inline'
                     script: |
-                      echo "##[group]🚀 Deploying Proxy"
+                      echo "##[group]🔧 Installing Apigee CLI"
+                      mkdir -p $HOME/.apigeecli/bin
+                      curl -L https://raw.githubusercontent.com/apigee/apigeecli/main/downloadLatest.sh | sh -
+                      echo "##vso[task.prependpath]$HOME/.apigeecli/bin"
+                      echo "##[section] apigeecli installed successfully"
+
+                - task: Bash@3
+                  displayName: 'Create and Upload Bundle'
+                  name: uploadBundle
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "##[group]📦 Creating and Uploading Bundle"
                       
-                      # Determine organization and environment
-                      ORG_NAME=$([ "$(deploymentType)" == "prod" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
-                      ENV_NAME="${{ parameters.environmentGroup }}-${{ parameters.environmentType }}"
-                      if [[ "${{ parameters.environmentGroup }}" == "default" ]]; then
-                        ENV_NAME="${{ parameters.environmentType }}"
+                      # Create bundle directory
+                      mkdir -p bundle
+                      cp -r ${{ parameters.proxyDirectory }}/* bundle/
+                      
+                      # Create ZIP
+                      cd bundle
+                      zip -r ../proxy-bundle.zip .
+                      cd ..
+                      
+                      # Upload to Apigee
+                      ORG_NAME=$([ "${{ parameters.isProduction }}" == "true" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
+                      echo "Uploading to organization: $ORG_NAME"
+                      
+                      IMPORT_OUTPUT=$(apigeecli apis create bundle \
+                        --name "${{ parameters.proxyName }}" \
+                        --org "$ORG_NAME" \
+                        --token "$(ACCESS_TOKEN)" \
+                        --proxy-zip "proxy-bundle.zip")
+                      
+                      REVISION=$(echo "$IMPORT_OUTPUT" | grep -oP '"revision":\s*"\K[^"]+')
+                      echo "##vso[task.setvariable variable=REVISION;isOutput=true]$REVISION"
+                      echo "##[section] Bundle uploaded with revision: $REVISION"
+
+                - task: Bash@3
+                  displayName: 'Deploy API Proxy'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "##[group]🚀 Deploying API Proxy"
+                      
+                      # Set environment name
+                      ENV_NAME="${{ parameters.environmentType }}"
+                      if [ "${{ parameters.environmentGroup }}" != "default" ]; then
+                        ENV_NAME="${{ parameters.environmentGroup }}-${{ parameters.environmentType }}"
                       fi
+                      
+                      # Set organization
+                      ORG_NAME=$([ "${{ parameters.isProduction }}" == "true" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
                       
                       echo "Deploying to $ENV_NAME in $ORG_NAME"
                       
@@ -240,13 +270,13 @@ stages:
                       fi
 
   - stage: Cleanup
-    displayName: 'Cleanup and Summary'
-    dependsOn: PrepareAndDeploy
+    displayName: 'Cleanup'
+    dependsOn: Deploy
     condition: succeeded()
     variables:
-      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['getAccessToken.ACCESS_TOKEN'] ]
+      ACCESS_TOKEN: $[ stageDependencies.Build.GCP_Auth.outputs['authToGCP.ACCESS_TOKEN'] ]
     jobs:
-      - job: CleanupAndSummarize
+      - job: Cleanup
         steps:
           - task: Bash@3
             displayName: 'Cleanup Old Revisions'
@@ -255,45 +285,42 @@ stages:
               script: |
                 echo "##[group]🧹 Cleaning up old revisions"
                 
-                # Get all revisions
-                REVISIONS=$(apigeecli apis list revisions \
-                  --name "${{ parameters.proxyName }}" \
-                  --org "$(APIGEE_ORG)" \
-                  --token "$(ACCESS_TOKEN)")
-                
-                # Sort and keep latest 5 revisions
-                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -nr))
-                TOTAL=${#REVISION_ARRAY[@]}
+                # Keep latest 5 revisions
                 KEEP_COUNT=5
                 
+                # Get all revisions
+                ORG_NAME=$([ "${{ parameters.isProduction }}" == "true" ] && echo "$(APIGEE_ORG_PROD)" || echo "$(APIGEE_ORG)")
+                
+                REVISIONS=$(apigeecli apis list revisions \
+                  --name "${{ parameters.proxyName }}" \
+                  --org "$ORG_NAME" \
+                  --token "$(ACCESS_TOKEN)")
+                
+                # Convert to array and sort
+                REVISION_ARRAY=($(echo $REVISIONS | tr ',' '\n' | sort -n))
+                TOTAL=${#REVISION_ARRAY[@]}
+                
                 if [ $TOTAL -gt $KEEP_COUNT ]; then
-                  for ((i=$KEEP_COUNT; i<$TOTAL; i++)); do
-                    REV=${REVISION_ARRAY[$i]}
+                  for ((i=0; i<TOTAL-KEEP_COUNT; i++)); do
+                    REV="${REVISION_ARRAY[$i]}"
                     echo "Deleting revision $REV..."
                     
                     apigeecli apis delete revision \
                       --name "${{ parameters.proxyName }}" \
-                      --org "$(APIGEE_ORG)" \
+                      --org "$ORG_NAME" \
                       --rev "$REV" \
-                      --token "$(ACCESS_TOKEN)" \
-                      || echo "Failed to delete revision $REV"
+                      --token "$(ACCESS_TOKEN)" || true
                   done
                 fi
                 
                 echo "##[section] Cleanup complete"
 
           - task: PowerShell@2
-            displayName: 'Generate Deployment Summary'
+            displayName: 'Generate Summary'
             inputs:
               targetType: 'inline'
               script: |
                 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                $envName = if ("${{ parameters.environmentGroup }}" -eq "default") { 
-                  "${{ parameters.environmentType }}" 
-                } else { 
-                  "${{ parameters.environmentGroup }}-${{ parameters.environmentType }}" 
-                }
-                
                 $summary = @"
                 # 🚀 Apigee Deployment Summary
                 
@@ -301,33 +328,31 @@ stages:
                 | Category | Details |
                 |----------|---------|
                 | Proxy Name | ${{ parameters.proxyName }} |
-                | Environment | $envName |
-                | Version | $(versionId) |
+                | Environment | ${{ parameters.environmentType }} |
                 | Status | ✅ Success |
                 | Timestamp | $timestamp |
                 
-                ## 🔍 Deployment Details
+                ## 🔍 Environment Details
+                - Group: ${{ parameters.environmentGroup }}
+                - Type: ${{ parameters.environmentType }}
                 - Organization: $(APIGEE_ORG)
-                - Environment Group: ${{ parameters.environmentGroup }}
-                - Environment Type: ${{ parameters.environmentType }}
                 - Build ID: $(Build.BuildId)
-                - Pipeline Run: [View Run]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId))
                 
-                ## 📊 Verification Results
-                - ✅ Authentication Successful
-                - ✅ Bundle Creation Verified
-                - ✅ Deployment Completed
-                - ✅ Cleanup Processed
+                ## 📊 Deployment Results
+                - ✅ Validation Passed
+                - ✅ Bundle Created
+                - ✅ Deployment Successful
+                - ✅ Cleanup Completed
                 
                 _Generated at: $timestamp_
                 "@
                 
                 $summary | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-summary.md"
                 
-                Write-Host "##[section] Summary generated successfully"
+                Write-Host "##[section] Summary generated"
 
           - task: PublishBuildArtifacts@1
-            displayName: 'Publish Deployment Summary'
+            displayName: 'Publish Summary'
             inputs:
               pathToPublish: '$(Build.ArtifactStagingDirectory)/deployment-summary.md'
               artifactName: 'DeploymentSummary'
